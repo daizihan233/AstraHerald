@@ -105,9 +105,8 @@ fn deliver(
 
     match action {
         SceneAction::Strong => crate::notice::show(text, sender, replies, target, history_id),
-        SceneAction::Side => {
-            crate::notice::show_side(text, sender, replies, Some(target), history_id)
-        }
+        // 侧通知只显示文字、不给候选回复，所以不传 target（target 仍要给延后队列）。
+        SceneAction::Side => crate::notice::show_side(text, sender, history_id),
         // 「延后至下课」先存进队列，等离开了上课那一格再放行（defer.rs）。
         // 进队列就算处理掉了：稍后会自己弹出来。
         SceneAction::Postpone => {

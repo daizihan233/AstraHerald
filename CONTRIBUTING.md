@@ -14,7 +14,7 @@
 ## 安装包模板是 fork 过的
 
 Tauri 不支持配置安装目录，所以 `src-tauri/nsis/installer.nsi` 是从 `@tauri-apps/cli` 里提取原版 NSIS 模板、
-再打三处补丁的产物（`bundle.windows.nsis.template` 指过去）：
+再打四处补丁的产物（`bundle.windows.nsis.template` 指过去）：
 
 1. 目录选择页的默认值：`D:\AstraHerald` 可写就用它，否则 `C:\AstraHerald`，两个盘都不可写才回
    `$LOCALAPPDATA\AstraHerald`（`AstraHeraldPickInstallDir` / `AstraHeraldDirWritable`）；升级 / 重装沿用注册表里
@@ -25,6 +25,10 @@ Tauri 不支持配置安装目录，所以 `src-tauri/nsis/installer.nsi` 是从
 3. WebView2 缓存不再落在 `%LOCALAPPDATA%\<identifier>`，改到安装目录下的 `.webview2`：主窗口在
    `tauri.conf.json` 里 `create: false`，由 `lib.rs` 的 setup 用 `WebviewWindowBuilder` +
    `utils::webview_data_dir()` 建；两个提醒窗同理
+4. 无人值守安装的命令行预设：`.onInit` 读 `/KEY=值`（`GetOptions` 自己会剥引号，别再写 trim），
+   `Section Install` 摊平成 `$INSTDIR\install-preset.ini`，首次启动由 `src-tauri/src/preset.rs`
+   并进 `config.json` 再删掉；ini 用 key=value 而不是 JSON（NSIS 里写 JSON 得转义反斜杠，Windows
+   路径会变成非法转义）。卸载清单里也要带 `install-preset.ini`
 
 升级 `@tauri-apps/cli` 之后重跑 `node scripts/sync-nsis-template.mjs`：脚本按锚点从 CLI 二进制里重新提取
 原版再补齐补丁，锚点对不上就直接 throw，不会写坏文件。

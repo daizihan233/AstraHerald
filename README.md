@@ -21,6 +21,19 @@ QQ 消息托管 + 私聊分级提醒 + 课表联动。Tauri v2 + Vue 3 + NaiveUI
 - 退出时只收掉本应用自己拉起的那个框架进程，你自己起的框架不受影响
 - 启动时会查一次更新（读 OSS 上的版本信息），有新版会问你要不要下载并安装
 
+无人值守安装：安装包认命令行参数，配合 `/S` 一条命令就能装完并预设好配置（`/D=` 必须是最后一个
+参数且不能加引号；其余参数的值里带 `/` 或空格的——URL、带空格的路径——要用双引号包住）：
+
+- `/AUTOSTART=0|1`：开机自启
+- `/PERIOD=in_class|after_class`：连不上课表服务时的默认状态
+- `/WHITELIST=1,2,3` `/BLACKLIST=4,5`：逗号分隔的 QQ 号
+- `/ONEBOT=<启动文件>` `/ONEBOT_HOST=` `/ONEBOT_PORT=` `/ONEBOT_PATH=` `/ONEBOT_TOKEN=`：连接配置
+- `/SIDE_DURATION=15`：侧通知显示时长（秒）
+- `/UPDATER=0|1` `/UPDATE_SOURCE=<latest.json 地址>`：自动更新
+
+这些值先摊成安装目录里的 `install-preset.ini`，首次启动并入 `config.json` 后自动删掉；
+带了预设参数的那次启动不会再弹配置页。注意升级 / 重装沿用上次的安装位置，`/D=` 想换位置得先卸载。
+
 ## OneBot 框架（自备）
 
 QQ Hook 与 OneBot 11 网关由你自备的框架承担，本应用不随包发布它：两边各自升级，也不用去改

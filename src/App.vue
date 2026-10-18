@@ -12,13 +12,13 @@ import ConfigPage from "./pages/ConfigPage.vue";
 import ConnectionStatus from "./components/ConnectionStatus.vue";
 import { onMounted } from "vue";
 import { useSystemTheme } from "./theme.js";
-import { checkUpdate } from "./update.js";
+import { checkUpdateOnStart } from "./update.js";
 
 // 跟随系统深浅色；提醒窗口共用同一份逻辑（src/theme.js）。
 const { theme } = useSystemTheme();
 
-// 启动查一次更新；没更新、查不到都什么也不弹。
-onMounted(checkUpdate);
+// 启动查一次更新；配置里关了自动更新、没更新、查不到都什么也不弹。
+onMounted(checkUpdateOnStart);
 </script>
 
 <template>

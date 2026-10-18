@@ -1,5 +1,5 @@
 <script setup>
-import { NButton, NCard, NSelect } from "naive-ui";
+import { NCard, NSelect } from "naive-ui";
 import { SCENE_PERIODS, SCENE_STATES, sceneActionsFor } from "../config/schema.js";
 
 /// { in_class: { fullscreen, maximized, unfocused, desktop }, after_class: { ... } }
@@ -13,16 +13,11 @@ const optionsByPeriod = Object.fromEntries(
   ]),
 );
 
-/// 卡片右上角的「预览侧通知」：这里只发事件，真正调后端的是配置页。
-const emit = defineEmits(["preview"]);
 </script>
 
 <template>
   <n-card size="small">
     <template #header>场景设置</template>
-    <template #header-extra>
-      <n-button size="tiny" quaternary @click="emit('preview')">预览侧通知</n-button>
-    </template>
 
     <p class="hint">按「窗口状态 × 是否在上课」决定怎么提醒。</p>
 

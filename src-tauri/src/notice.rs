@@ -410,7 +410,8 @@ const SIDE_PAGE: &str = "side.html";
 const SIDE_EVENT: &str = "side:new";
 
 /// 卡片宽度、距屏幕边沿和条与条之间的留白（逻辑像素）。
-const SIDE_WIDTH: f64 = 360.0;
+/// 宽度跟着字号一起放大过：360 太窄，17px 的正文一行放不下几个字。
+const SIDE_WIDTH: f64 = 400.0;
 const SIDE_MARGIN: f64 = 16.0;
 const SIDE_GAP: f64 = 12.0;
 
@@ -421,8 +422,15 @@ const SIDE_FALLBACK_HEIGHT: u32 = 120;
 const SIDE_MIN_HEIGHT: f64 = 64.0;
 const SIDE_MAX_HEIGHT: f64 = 420.0;
 
-/// 自动收起的时间。必须和 src/side/SideNotification.vue 里那条进度线的时长一致。
-const SIDE_DURATION_MS: u64 = 15000;
+/// 自动收起的时间（配置页可改，见 config.rs 的 SideSettings）。
+///
+/// 侧通知页面里那条进度线用的是同一个值：它自己 invoke("get_config") 读 side.duration_secs。
+fn side_duration_ms() -> u64 {
+    let secs = crate::config::Config::load_or_create(crate::config::CONFIG_PATH)
+        .side
+        .clamped_secs();
+    secs * 1000
+}
 
 /// 一条正在显示的侧通知。
 struct SideSlot {
@@ -430,8 +438,6 @@ struct SideSlot {
     /// 当前高度（物理像素），页面量好后通过 side_resize 报上来。
     height: u32,
     payload: NoticePayload,
-    /// 预览触发的侧通知没有回复地址（点候选回复会提示不能发）。
-    target: Option<ReplyTarget>,
     /// 对应聊天记录里的哪一条：重放同一条时不重复弹卡片。
     history_id: Option<u64>,
 }
@@ -458,8 +464,6 @@ impl SidePanel {
         &mut self,
         text: String,
         sender: String,
-        replies: Vec<String>,
-        target: Option<ReplyTarget>,
         history_id: Option<u64>,
     ) -> Option<(String, u64, Option<String>)> {
         // 已经在右上角挂着的同一条聊天记录：不再弹第二张卡。
@@ -469,11 +473,13 @@ impl SidePanel {
             }
         }
         self.seq += 1;
+        // replies 恒空：侧通知不给候选回复（真回复请走强提醒窗）。这里留着这个字段是因为
+        // 侧通知和强提醒共用 NoticePayload，拆开得不偿失。
         let payload = NoticePayload {
             id: self.seq,
             text,
             sender,
-            replies,
+            replies: Vec::new(),
         };
 
         // 先找一个空着的窗口 label。
@@ -504,7 +510,6 @@ impl SidePanel {
                 label: label.clone(),
                 height: SIDE_FALLBACK_HEIGHT,
                 payload,
-                target,
                 history_id,
             },
         );
@@ -525,39 +530,6 @@ pub fn side_current(
         .find(|slot| slot.label == window.label())
         .map(|slot| slot.payload.clone());
     payload
-}
-
-/// 侧通知卡片上的候选回复。
-#[tauri::command]
-pub fn side_reply(
-    reply: String,
-    window: WebviewWindow,
-    state: tauri::State<'_, SideState>,
-) -> Result<(), String> {
-    let reply = reply.trim();
-    if reply.is_empty() {
-        return Err("回复内容为空".to_string());
-    }
-    let target = {
-        let panel = state.inner.lock().expect("侧通知状态锁被 poison");
-        panel
-            .slots
-            .iter()
-            .find(|slot| slot.label == window.label())
-            .and_then(|slot| slot.target)
-    };
-    let Some(target) = target else {
-        return Err("这条侧通知没有可以回复的消息".to_string());
-    };
-    let bot = bot_handle().ok_or_else(|| "bot 还没就绪".to_string())?;
-    // 同上：重放出来的消息没有原始 id，不带引用。
-    let message = if target.message_id == 0 {
-        Message::from(reply)
-    } else {
-        Message::from(reply).add_reply(target.message_id)
-    };
-    bot.send_private_msg(target.sender_id, message);
-    Ok(())
 }
 
 /// 页面量好高度后报上来：改窗口尺寸，再把这一列重排一遍。
@@ -588,16 +560,11 @@ pub fn side_close(window: WebviewWindow) {
     dismiss_side(&app, window.label());
 }
 
-/// 收到私聊消息时按侧通知形式弹出来（将来接场景矩阵的就是这个入口）。
+/// 收到私聊消息时按侧通知形式弹出来（场景矩阵里「侧通知」那一格走的就是这个入口）。
 ///
-/// `target` 传 None 表示只是展示、不提供回复——预览走的就是这条路。
-pub fn show_side(
-    text: &str,
-    sender: &str,
-    replies: Vec<String>,
-    target: Option<ReplyTarget>,
-    history_id: Option<u64>,
-) -> bool {
+/// 侧通知**不给**候选回复：它是一条从屏幕边上滑过的轻提醒，真回复请用强提醒窗
+/// （notice_reply）。这里只显示文字，所以不需要 ReplyTarget。
+pub fn show_side(text: &str, sender: &str, history_id: Option<u64>) -> bool {
     let text = text.trim();
     if text.is_empty() {
         return false;
@@ -612,13 +579,7 @@ pub fn show_side(
     let Some((label, generation, evicted)) = ({
         let state = app.state::<SideState>();
         let mut panel = state.inner.lock().expect("侧通知状态锁被 poison");
-        panel.push(
-            text.to_string(),
-            sender.trim().to_string(),
-            replies,
-            target,
-            history_id,
-        )
+        panel.push(text.to_string(), sender.trim().to_string(), history_id)
     }) else {
         return false;
     };
@@ -646,7 +607,10 @@ pub fn show_side(
                 .map(|slot| slot.payload.clone())
         };
         if let Some(payload) = payload {
-            if let Err(error) = window.emit(SIDE_EVENT, payload) {
+            // 必须定向 emit：emit 是广播，三条侧通知窗口都会收到同一条 payload，
+            // 而前端按 payload.id 递增判断「是不是新的」——晚到的新消息会把
+            // 已经在显示的那几条全改成同一条文字（用户报的就是这个）。
+            if let Err(error) = app.emit_to(label.as_str(), SIDE_EVENT, payload) {
                 eprintln!("把侧通知推给窗口失败：{error}");
             }
         }
@@ -665,12 +629,10 @@ pub fn show_side(
 pub async fn notice_preview_side() {
     show_side(
         &format!(
-            "这是一条侧通知预览：点右上角 ✕，或者等 {} 秒它自己收起来。",
-            SIDE_DURATION_MS / 1000
+            "这是一条侧通知预览：点右上角的 ✕，或者等 {} 秒它自己收起来。",
+            side_duration_ms() / 1000
         ),
         "预览 · 侧通知",
-        vec!["收到".to_string(), "好的".to_string()],
-        None,
         None,
     );
 }
@@ -763,9 +725,10 @@ fn restack(app: &AppHandle) {
     }
 }
 
-/// 滑入的步数和每步间隔：12 步 × 14ms，约 170ms 走完，和系统通知的手感差不多。
-const SIDE_SLIDE_STEPS: u32 = 12;
-const SIDE_SLIDE_STEP_MS: u64 = 14;
+/// 滑入的步数和每步间隔：16 步 × 12ms，约 190ms 走完，和系统通知的手感差不多。
+/// 步数比早先多一点：之前匀速 12 步看着像被生硬地「推」进去。
+const SIDE_SLIDE_STEPS: u32 = 16;
+const SIDE_SLIDE_STEP_MS: u64 = 12;
 
 /// 把一条侧通知从屏幕右沿推进来，到位后就地显示（像系统通知那样滑出来）。
 ///
@@ -795,8 +758,10 @@ fn slide_in(window: &tauri::WebviewWindow) {
     std::thread::spawn(move || {
         let distance = target.x as f64 - start_x as f64;
         for step in 1..=SIDE_SLIDE_STEPS {
+            // ease-out cubic：起步快、收尾慢，滑到位时不再「哐」一下停住。
             let ratio = step as f64 / SIDE_SLIDE_STEPS as f64;
-            let x = start_x + (distance * ratio).round() as i32;
+            let eased = 1.0 - (1.0 - ratio).powi(3);
+            let x = start_x + (distance * eased).round() as i32;
             // y 每步都重新读：滑动途中又有新通知进来，restack 改过的 y 不能被这里覆盖回去。
             let Ok(now) = window.outer_position() else {
                 return;
@@ -845,7 +810,7 @@ fn dismiss_side(app: &AppHandle, label: &str) {
 /// 到点自动收起。只是让一个线程睡一觉，不值得为它引一个异步运行时。
 fn schedule_dismiss(app: AppHandle, label: String, generation: u64) {
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(SIDE_DURATION_MS));
+        std::thread::sleep(Duration::from_millis(side_duration_ms()));
         let still_showing = {
             let state = app.state::<SideState>();
             let panel = state.inner.lock().expect("侧通知状态锁被 poison");

@@ -8,7 +8,9 @@ mod notice;
 mod roles;
 mod schedule;
 mod onebot;
+mod preset;
 mod status;
+mod update;
 mod utils;
 mod win;
 
@@ -219,6 +221,11 @@ pub fn run() {
     // （owl-logger/src/guard.rs:38 的 must_use 就是提醒这件事）。
     let _logger_guard = owl_logger::init();
 
+    // 无人值守安装：安装器可能把命令行参数摊成 install-preset.ini 放在安装目录里
+    // （scripts/sync-nsis-template.mjs 生成的 NSIS 段落），开机首次启动时并进配置再删掉。
+    // 必须赶在 first_run 之前——并进去了就不算「第一次运行」，也就不会弹配置页。
+    preset::apply_if_any();
+
     // bot 和配置页都会用 load_or_create 把缺失的配置补出来，所以「是不是第一次运行」
     // 必须在 spawn bot / 显示窗口之前问——晚一步问，文件已经被补出来了，永远是 false。
     let first_run = !std::path::Path::new(CONFIG_PATH).exists();
@@ -238,7 +245,6 @@ pub fn run() {
             notice::notice_close,
             notice::notice_preview_side,
             notice::side_current,
-            notice::side_reply,
             notice::side_resize,
             notice::side_close,
             roles::auto_fill_roles,
@@ -247,6 +253,8 @@ pub fn run() {
             history::history_replay,
             status::connection_status,
             onebot::discover_onebot,
+            update::check_update,
+            update::install_update,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

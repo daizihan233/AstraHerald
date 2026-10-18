@@ -90,6 +90,10 @@ pub struct Config {
     pub onebot: OnebotSettings,
     /// 收到文件消息时的后缀名策略，见 files.rs。
     pub files: FilePolicy,
+    /// 侧通知的显示设置，见 notice.rs。
+    pub side: SideSettings,
+    /// 自动更新设置，见 update.rs。
+    pub updater: UpdaterSettings,
 }
 
 impl Default for Config {
@@ -106,6 +110,52 @@ impl Default for Config {
             autostart: true,
             onebot: OnebotSettings::default(),
             files: FilePolicy::default(),
+            side: SideSettings::default(),
+            updater: UpdaterSettings::default(),
+        }
+    }
+}
+
+/// 侧通知（从屏幕右边滑进来的那条）的显示设置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SideSettings {
+    /// 显示多少秒后自动收起。太短看不清、太长会一直挂在屏幕上，两头都夹一下。
+    pub duration_secs: u64,
+}
+
+impl Default for SideSettings {
+    fn default() -> Self {
+        Self { duration_secs: 15 }
+    }
+}
+
+impl SideSettings {
+    /// 秒数夹到 3..=300：写 0 会瞬间消失、写 100000 等于永不收起。
+    pub const MIN_SECS: u64 = 3;
+    pub const MAX_SECS: u64 = 300;
+
+    pub fn clamped_secs(&self) -> u64 {
+        self.duration_secs.clamp(Self::MIN_SECS, Self::MAX_SECS)
+    }
+}
+
+/// 自动更新设置（tauri-plugin-updater，签名见 tauri.conf.json 的 plugins.updater）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdaterSettings {
+    /// 启动时自动查一次更新。默认开；关掉只影响「自动查」，配置页里手动点检查还是能查。
+    pub enabled: bool,
+    /// 更新源（latest.json 的地址）。留空 = 用内置的官方源。
+    /// 给国内网络或自建镜像留的口子：填了自己的源就完全按自己的源查。
+    pub source: String,
+}
+
+impl Default for UpdaterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            source: String::new(),
         }
     }
 }

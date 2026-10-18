@@ -16,7 +16,6 @@ use serde::Serialize;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
-use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -252,18 +251,18 @@ pub fn driver_config(config: &Config) -> OneBotDriverConfig {
             ),
         };
     }
-    // kovi-onebot 的 load_local_conf() 在 kovi.conf.toml 缺失或解析不了时会用 dialoguer
-    // 交互提问，拿不到终端就直接 panic（kovi-onebot/src/driver/config.rs:141 的
-    // expect("unreachable")）。GUI 进程永远没有终端，一调就把重连循环整个崩掉，
-    // 所以这条路只留给真有终端的情况（bot-only 在命令行里跑）。
-    if Path::new("kovi.conf.toml").is_file() {
-        if std::io::stdin().is_terminal() {
-            match kovi_onebot::load_local_conf() {
-                Ok(conf) => return conf,
-                Err(e) => eprintln!("读 kovi.conf.toml 失败：{e}"),
+    // 兼容手写 kovi.conf.toml 的老用法：只认里面有 [server] 段的那种。
+    // 刻意不调 kovi_onebot::load_local_conf()：文件在但缺 [server] 段时（比如 kovi
+    // 自己写的那份只有 [config]）它会走 dialoguer 交互提问，拿不到终端就 panic
+    // （kovi-onebot/src/driver/config.rs:141 的 expect("unreachable")），把整个 bot
+    // 重连循环崩掉。自己用 kovi 转出的 toml 解析，任何情况下都不碰终端。
+    if let Ok(text) = fs::read_to_string("kovi.conf.toml") {
+        match kovi::toml::from_str::<OneBotDriverConfig>(&text) {
+            Ok(conf) => {
+                eprintln!("连接参数来自 kovi.conf.toml 的 [server] 段");
+                return conf;
             }
-        } else {
-            eprintln!("读 kovi.conf.toml 要交互，GUI 里跳过，先用默认的 127.0.0.1:3001");
+            Err(_) => eprintln!("kovi.conf.toml 里没有能用的 [server] 段，忽略它"),
         }
     }
     eprintln!("没读到框架的 WS 配置，先用默认的 127.0.0.1:3001（配置页里指定框架的启动文件）");
@@ -354,6 +353,10 @@ pub fn ensure_running(config: &Config) -> bool {
         // 设了就不弹「先同意条款」，也不写 consent.json。别的框架忽略这两个变量。
         .env("SNOWLUMA_ACCEPT_EULA", "1")
         .env("SNOWLUMA_ACCEPT_PRIVACY", "1")
+        // 自动注入 Hook 的开关：这个变量优先级高于 runtime.json（官方文档），
+        // 所以我们拉起的这一份即使 runtime.json 是自动生成的 false 也一定能收到消息。
+        // 仍然要顺手修 runtime.json（ensure_hook_autoload）——用户自己起框架时注入不了环境变量。
+        .env("SNOWLUMA_HOOK_AUTOLOAD", "1")
         .current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

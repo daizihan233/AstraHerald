@@ -54,6 +54,24 @@ export function defaultOnebot() {
   return { ...ONEBOT_DEFAULT };
 }
 
+/// 侧通知默认显示时长（秒），必须和 config.rs 的 Default for SideSettings 一致。
+/// 后端会 clamp 到 3..300，界面上的数字输入框用同一区间。
+export const SIDE_DEFAULT = { duration_secs: 15 };
+
+/// 默认侧通知设置的副本——调用方会就地改它，不能把常量本身漏出去。
+export function defaultSide() {
+  return { ...SIDE_DEFAULT };
+}
+
+/// 自动更新默认值，必须和 config.rs 的 Default for UpdaterSettings 一致：
+/// 默认开、更新源留空（= 用 tauri.conf.json 里编译进去的那个地址）。
+export const UPDATER_DEFAULT = { enabled: true, source: "" };
+
+/// 默认自动更新设置的副本——调用方会就地改它，不能把常量本身漏出去。
+export function defaultUpdater() {
+  return { ...UPDATER_DEFAULT };
+}
+
 /// 文件消息的后缀名策略默认值，必须和 config.rs 的 Default for FilePolicy 一致：
 /// 文档默认自动打开（上课时那位任课老师发来的才真打开，见 files.rs），
 /// 截图默认完全不管，其余后缀兜底只下载到桌面。
@@ -164,6 +182,19 @@ export function normalizeConfig(raw) {
     files: {
       open: normalizeExtList(raw?.files?.open, FILE_POLICY_DEFAULT.open),
       ignore: normalizeExtList(raw?.files?.ignore, FILE_POLICY_DEFAULT.ignore),
+    },
+    side: {
+      // 读到垃圾（手改坏了）就用默认值：输入框不接受 NaN。
+      duration_secs: Number.isFinite(Number(raw?.side?.duration_secs))
+        ? Number(raw.side.duration_secs)
+        : SIDE_DEFAULT.duration_secs,
+    },
+    updater: {
+      enabled:
+        raw?.updater?.enabled === undefined
+          ? UPDATER_DEFAULT.enabled
+          : Boolean(raw.updater.enabled),
+      source: String(raw?.updater?.source ?? ""),
     },
   };
 }

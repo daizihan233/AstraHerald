@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { historyList, historyReplay } from "../api.js";
 import { useSystemTheme } from "../theme.js";
 
-const { theme } = useSystemTheme();
+const { isDark, theme } = useSystemTheme();
 
 // 后端只留最近 500 条，最新的在前（history.rs 的 list）。
 const entries = ref([]);
@@ -101,7 +101,7 @@ onBeforeUnmount(() => {
 
 <template>
   <n-config-provider :theme="theme" :locale="zhCN" :date-locale="dateZhCN">
-    <div class="history">
+    <div class="history" :class="{ 'history--dark': isDark }">
       <header class="history__bar">
         <div class="history__meta">
           <h1 class="history__title">聊天记录</h1>
@@ -156,8 +156,15 @@ onBeforeUnmount(() => {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--n-color, #fff);
-  color: var(--n-text-color, #1f1f1f);
+  background: #ffffff;
+  color: #1f1f1f;
+}
+
+/* 窗口是复用显示/隐藏的，主题只看系统：NaiveUI 的 --n-color 在这里没有定义，
+   以前写 var(--n-color, #fff) 就永远退回落白底，深色模式下白得刺眼。 */
+.history--dark {
+  background: #101014;
+  color: #f0f0f0;
 }
 
 .history__bar {

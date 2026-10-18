@@ -1,9 +1,10 @@
 ; ---------------------------------------------------------------------------
 ; AstraHerald 定制版 NSIS 模板 —— 不要手改，改动请写到 scripts/sync-nsis-template.mjs
-; 相对 Tauri 原版 installer.nsi 只有三处差异：
+; 相对 Tauri 原版 installer.nsi 只有四处差异：
 ;   1. currentUser 模式的默认安装目录：D:\AstraHerald → C:\AstraHerald → %LOCALAPPDATA%（只有两个盘都不可写时才用）
 ;   2. 追加 AstraHeraldPickInstallDir / AstraHeraldDirWritable 两个函数
 ;   3. 卸载勾了「删除应用数据」时，连安装目录里的运行时数据一起清掉（见 NEW_APPDATA）
+;   4. 安装时可用命令行参数预设设置（/AUTOSTART=1 /ONEBOT=... 见 PRESET_BLOCK），摊平成 $INSTDIR\install-preset.ini
 ; 升级 Tauri（@tauri-apps/cli）后重跑：node scripts/sync-nsis-template.mjs
 ; ---------------------------------------------------------------------------
 Unicode true
@@ -492,7 +493,105 @@ FunctionEnd
   !include "{{this}}"
 {{/each}}
 
+; --- AstraHerald 定制：安装时命令行预设 -------------------------------------
+; 用法（可只传一部分）：
+;   AstraHerald_x.y.z_x64-setup.exe /S /AUTOSTART=1 /PERIOD=after_class
+;     /WHITELIST=123,456 /BLACKLIST= /ONEBOT=D:\SnowLuma\launcher.bat
+;     /ONEBOT_HOST= /ONEBOT_PORT= /ONEBOT_PATH= /ONEBOT_TOKEN=
+;     /SIDE_DURATION=20 /UPDATER=0 /UPDATE_SOURCE=https://example.com/latest.json
+; 值里带 / 或空格的（URL、带空格的路径）建议用双引号包住：/UPDATE_SOURCE="https://example.com/latest.json"；
+; GetOptions 只在引号外把 / 当参数边界，所以没加引号一般也认，加了更保险。
+; 这里只负责摊平成 $INSTDIR\install-preset.ini；首次启动时由 src-tauri/src/preset.rs
+; 并进 config.json 再把它删掉。所以装完不启动就等于没设过。
+Var AstraHeraldHasPreset
+Var AstraHeraldAutostart
+Var AstraHeraldPeriod
+Var AstraHeraldWhitelist
+Var AstraHeraldBlacklist
+Var AstraHeraldOnebotStartup
+Var AstraHeraldOnebotHost
+Var AstraHeraldOnebotPort
+Var AstraHeraldOnebotPath
+Var AstraHeraldOnebotToken
+Var AstraHeraldSideDuration
+Var AstraHeraldUpdater
+Var AstraHeraldUpdateSource
+
+; 取一个 /KEY=值：$R0 是 ${GetParameters} 的结果（下面用宏，别在这里改 $R0）。
+!macro AstraHeraldTakeOption KEY VAR
+  ${GetOptions} $R0 "/${KEY}=" $R1
+  ${IfNot} ${Errors}
+    ${If} $R1 != ""
+      StrCpy ${VAR} $R1
+      StrCpy $AstraHeraldHasPreset "1"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+Function AstraHeraldReadPreset
+  StrCpy $AstraHeraldHasPreset "0"
+  ${GetParameters} $R0
+  !insertmacro AstraHeraldTakeOption AUTOSTART $AstraHeraldAutostart
+  !insertmacro AstraHeraldTakeOption PERIOD $AstraHeraldPeriod
+  !insertmacro AstraHeraldTakeOption WHITELIST $AstraHeraldWhitelist
+  !insertmacro AstraHeraldTakeOption BLACKLIST $AstraHeraldBlacklist
+  !insertmacro AstraHeraldTakeOption ONEBOT $AstraHeraldOnebotStartup
+  !insertmacro AstraHeraldTakeOption ONEBOT_HOST $AstraHeraldOnebotHost
+  !insertmacro AstraHeraldTakeOption ONEBOT_PORT $AstraHeraldOnebotPort
+  !insertmacro AstraHeraldTakeOption ONEBOT_PATH $AstraHeraldOnebotPath
+  !insertmacro AstraHeraldTakeOption ONEBOT_TOKEN $AstraHeraldOnebotToken
+  !insertmacro AstraHeraldTakeOption SIDE_DURATION $AstraHeraldSideDuration
+  !insertmacro AstraHeraldTakeOption UPDATER $AstraHeraldUpdater
+  !insertmacro AstraHeraldTakeOption UPDATE_SOURCE $AstraHeraldUpdateSource
+FunctionEnd
+
+; 摊平成 preset.rs 认的那份 key=value（空值不写，等于没传）。
+Function AstraHeraldWritePreset
+  StrCmp $AstraHeraldHasPreset "1" 0 astraherald_preset_skip
+  FileOpen $R9 "$INSTDIR\install-preset.ini" w
+  FileWrite $R9 "[app]$\r$\n"
+  ${If} $AstraHeraldAutostart != ""
+    FileWrite $R9 "autostart=$AstraHeraldAutostart$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldPeriod != ""
+    FileWrite $R9 "period=$AstraHeraldPeriod$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldWhitelist != ""
+    FileWrite $R9 "whitelist=$AstraHeraldWhitelist$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldBlacklist != ""
+    FileWrite $R9 "blacklist=$AstraHeraldBlacklist$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldOnebotStartup != ""
+    FileWrite $R9 "onebot_startup=$AstraHeraldOnebotStartup$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldOnebotHost != ""
+    FileWrite $R9 "onebot_host=$AstraHeraldOnebotHost$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldOnebotPort != ""
+    FileWrite $R9 "onebot_port=$AstraHeraldOnebotPort$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldOnebotPath != ""
+    FileWrite $R9 "onebot_path=$AstraHeraldOnebotPath$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldOnebotToken != ""
+    FileWrite $R9 "onebot_token=$AstraHeraldOnebotToken$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldSideDuration != ""
+    FileWrite $R9 "side_duration=$AstraHeraldSideDuration$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldUpdater != ""
+    FileWrite $R9 "updater=$AstraHeraldUpdater$\r$\n"
+  ${EndIf}
+  ${If} $AstraHeraldUpdateSource != ""
+    FileWrite $R9 "update_source=$AstraHeraldUpdateSource$\r$\n"
+  ${EndIf}
+  FileClose $R9
+astraherald_preset_skip:
+FunctionEnd
 Function .onInit
+  ; AstraHerald: 读安装命令行的预设参数（见上面的 PRESET_BLOCK）
+  Call AstraHeraldReadPreset
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
@@ -662,6 +761,9 @@ SectionEnd
 
 Section Install
   SetOutPath $INSTDIR
+
+  ; AstraHerald: 把预设摊平成 $INSTDIR\install-preset.ini（首次启动由 preset.rs 并进 config.json）
+  Call AstraHeraldWritePreset
 
   !ifmacrodef NSIS_HOOK_PREINSTALL
     !insertmacro NSIS_HOOK_PREINSTALL
@@ -909,6 +1011,7 @@ Section Uninstall
 
     ; AstraHerald: 运行时数据都落在安装目录里，勾了这个框就一并清掉，别让安装目录剩半截。
     ; 以后 app 往工作目录里写新文件，记得加到这里，不然最后的 RMDir 收不掉目录。
+    Delete "$INSTDIR\install-preset.ini"
     Delete "$INSTDIR\config.json"
     Delete "$INSTDIR\config.json.bak"
     Delete "$INSTDIR\history.jsonl"

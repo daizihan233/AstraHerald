@@ -8,7 +8,9 @@ import QuickRepliesCard from "../components/QuickRepliesCard.vue";
 import RolesCard from "../components/RolesCard.vue";
 import RuntimeCard from "../components/RuntimeCard.vue";
 import SceneMatrixCard from "../components/SceneMatrixCard.vue";
-import { autoFillRoles, friendOptions, loadConfig, previewSideNotice, saveConfig } from "../api.js";
+import SideNoticeCard from "../components/SideNoticeCard.vue";
+import UpdateCard from "../components/UpdateCard.vue";
+import { autoFillRoles, friendOptions, loadConfig, saveConfig } from "../api.js";
 import {
   DEFAULT_AUTOSTART,
   DEFAULT_PERIOD,
@@ -16,6 +18,8 @@ import {
   defaultFilePolicy,
   defaultOnebot,
   defaultScene,
+  defaultSide,
+  defaultUpdater,
   normalizeConfig,
 } from "../config/schema.js";
 
@@ -41,6 +45,10 @@ const autostart = ref(DEFAULT_AUTOSTART);
 const filePolicy = ref(defaultFilePolicy());
 /// 连接配置：启动文件 + 四项连接参数（留空 = 自动发现）。
 const onebot = ref(defaultOnebot());
+/// 侧通知：显示多久自己收起来。
+const side = ref(defaultSide());
+/// 更新：自动检查开关 + 更新源。
+const updater = ref(defaultUpdater());
 
 /// 最近一次读入/写出的表单快照，用来判断有没有未保存的改动。
 /// 存表单而不是 toConfig() 的结果：空行、只填了一半的行也算改动，
@@ -58,6 +66,8 @@ function formSnapshot() {
     autostart: autostart.value,
     onebot: onebot.value,
     filePolicy: filePolicy.value,
+    side: side.value,
+    updater: updater.value,
   });
 }
 
@@ -95,6 +105,17 @@ function toConfig() {
       access_token: onebot.value.access_token.trim(),
     },
     files: filePolicy.value,
+    // 时长给后端一个能用的整数：输入框清空时是 null，后端那边会 clamp 到 3..300。
+    side: {
+      duration_secs:
+        Number.isFinite(Number(side.value.duration_secs)) && Number(side.value.duration_secs) > 0
+          ? Math.round(Number(side.value.duration_secs))
+          : 15,
+    },
+    updater: {
+      enabled: Boolean(updater.value.enabled),
+      source: updater.value.source.trim(),
+    },
   };
 }
 
@@ -112,6 +133,8 @@ function toForm(config) {
   autostart.value = config.autostart;
   onebot.value = { ...defaultOnebot(), ...config.onebot };
   filePolicy.value = { open: [...config.files.open], ignore: [...config.files.ignore] };
+  side.value = { ...defaultSide(), ...config.side };
+  updater.value = { ...defaultUpdater(), ...config.updater };
 }
 
 const dirty = computed(() => formSnapshot() !== savedSnapshot.value);
@@ -259,16 +282,6 @@ function confirmReload() {
   });
 }
 
-/// 场景设置卡片右上角的按钮：让后端弹一条侧通知样品，先把效果看出来。
-/// 场景矩阵本身还没接上（缺「上课/下课」和窗口焦点状态的来源），所以先给个手动入口。
-async function onPreview() {
-  try {
-    await previewSideNotice();
-  } catch (error) {
-    message.error(String(error));
-  }
-}
-
 onMounted(reload);
 
 const actionsStyle = computed(() => ({
@@ -297,10 +310,12 @@ const actionsStyle = computed(() => ({
           title="黑名单"
           hint="只在白名单为空时生效：名单里的 QQ 会被忽略。"
         />
-        <scene-matrix-card v-model="scene" @preview="onPreview" />
+        <scene-matrix-card v-model="scene" />
         <connection-card v-model="onebot" />
         <runtime-card v-model:period="defaultPeriod" v-model:autostart="autostart" />
         <file-policy-card v-model="filePolicy" />
+        <side-notice-card v-model="side" />
+        <update-card v-model="updater" />
         <!-- 好友身份放在最后：一屏几十行，早先摆中间会把后面的卡片全顶下去 -->
         <roles-card
           v-model="roles"
