@@ -40,7 +40,7 @@ jobs:
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
       ENDPOINT: https://cn-nb1.rains3.com
-      BUCKET: yanmo-objects
+      BUCKET: kuohu-objects
       PREFIX: AstraHerald/
     steps:
       - name: Checkout code
@@ -172,7 +172,7 @@ jobs:
             aws s3 cp $local "s3://$env:BUCKET/$key" --endpoint-url "$env:ENDPOINT"
             if ($LASTEXITCODE -ne 0) { Write-Error "上传 $key 失败"; exit $LASTEXITCODE }
           }
-          # 按版本归档 + latest 稳定目录（客户端自动更新以后读 latest/）
+          # 按版本归档 + latest 稳定目录（客户端自动更新读 latest/）
           foreach ($file in Get-ChildItem 'dist-release' -File) {
             Push-OSS $file.FullName "${env:PREFIX}$ver/$($file.Name)"
             Push-OSS $file.FullName "${env:PREFIX}latest/$($file.Name)"
@@ -199,7 +199,7 @@ jobs:
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
       ENDPOINT: https://cn-nb1.rains3.com
-      BUCKET: yanmo-objects
+      BUCKET: kuohu-objects
       PREFIX: AstraHerald/latest/
     steps:
       - name: Checkout code
