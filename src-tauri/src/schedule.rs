@@ -83,6 +83,9 @@ pub fn start_watch() {
                     None => log::info!("课表状态：读不到 /status，提醒按配置里的默认状态算"),
                 }
             }
+            // 顺手把「上一个真正属于别人的前台窗口」记下来：提醒窗自己跑到前台时，判定
+            // 场景要沿用这份记忆（用户 m06942）。轮询每 2 秒一次，正好当保鲜心跳。
+            crate::win::remember_foreign_foreground();
             crate::defer::release_ready();
             std::thread::sleep(POLL_INTERVAL);
         }

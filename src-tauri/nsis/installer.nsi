@@ -495,7 +495,7 @@ FunctionEnd
 
 ; --- AstraHerald 定制：安装时命令行预设 -------------------------------------
 ; 用法（可只传一部分）：
-;   AstraHerald_x.y.z_x64-setup.exe /S /AUTOSTART=1 /PERIOD=after_class
+;   AstraHerald_x.y.z_x64-setup.exe /S /AUTOSTART=1 /PERIOD=in_class
 ;     /WHITELIST=123,456 /BLACKLIST= /ONEBOT=D:\SnowLuma\launcher.bat
 ;     /ONEBOT_HOST= /ONEBOT_PORT= /ONEBOT_PATH= /ONEBOT_TOKEN=
 ;     /SIDE_DURATION=20 /UPDATER=0 /UPDATE_SOURCE=https://example.com/latest.json
