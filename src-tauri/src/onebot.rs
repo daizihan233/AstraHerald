@@ -457,11 +457,34 @@ fn wait_ready(dir: &Path, host: &str, port: u16) {
 pub fn shutdown() {
     if let Ok(mut guard) = CHILD.lock() {
         if let Some(mut child) = guard.take() {
-            let _ = child.kill();
+            kill_tree(&mut child);
             let _ = child.wait();
             eprintln!("已关闭托管的 OneBot 框架进程");
         }
     }
+}
+
+/// 按进程树杀：用启动器批处理（SnowLuma 的 launcher.bat、NapCat 的 .bat）时，我们手上的
+/// 子进程是 cmd.exe，只杀它会把它拉起的 node 留成孤儿，继续占着 3001 端口。
+fn kill_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let pid = child.id().to_string();
+        let ok = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", pid.as_str()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if ok {
+            return;
+        }
+    }
+    let _ = child.kill();
 }
 /// 配置页「自动发现」按钮的返回值：从启动文件附近读到的连接参数。
 #[derive(Debug, Clone, Serialize)]

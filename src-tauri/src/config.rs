@@ -120,7 +120,7 @@ impl Default for Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OnebotSettings {
-    /// OneBot 框架的启动文件完整路径：exe / bat / mjs 都行（`D:\\SnowLuma\\index.mjs` 这种）。
+    /// OneBot 框架的启动文件完整路径：exe / bat / mjs 都行（`D:\\SnowLuma\\launcher.bat` 这种）。
     pub startup: String,
     /// 下面四项是「连接配置」卡片里的手填值。留空 = 该项自动发现（从启动文件附近读框架自己的配置）；
     /// 四项都空 = 完全不指定，只按 kovi.conf.toml / 默认的 127.0.0.1:3001 去连。

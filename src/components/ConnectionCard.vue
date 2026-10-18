@@ -70,7 +70,7 @@ function clear() {
         <div class="row__control">
           <n-input
             v-model:value="onebot.startup"
-            placeholder="D:\SnowLuma\index.mjs"
+            placeholder="D:\SnowLuma\launcher.bat"
             aria-label="OneBot 框架启动文件"
           />
           <n-button @click="browse">浏览…</n-button>
@@ -86,7 +86,7 @@ function clear() {
           <n-button quaternary @click="clear">清除</n-button>
         </div>
         <span class="hint">
-          指到框架的启动文件就行：SnowLuma 的 index.mjs、NapCat 的 launcher.bat、独立的 exe 都认。
+          指到框架的启动文件就行：SnowLuma / NapCat 的 launcher.bat、独立的 exe 都认。
           AstraHerald 从它所在的位置去找框架自己的 OneBot 配置（一般放在 config/ 下），
           需要时再把它当子进程拉起来；端口已经在听就直接用现成的那份。
         </span>

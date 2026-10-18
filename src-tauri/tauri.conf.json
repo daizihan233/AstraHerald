@@ -30,6 +30,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "publisher": "AstraHerald",
     "shortDescription": "QQ 消息托管与课表联动提醒",
     "longDescription": "把 QQ 私聊按课表状态与前台窗口状态分级提醒：强提醒窗、右侧侧通知、延后至下课；支持快速回复候选、白名单/黑名单、好友身份匹配与文件消息自动下载。",
@@ -46,5 +47,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU5QTA4QUE2NTM3MjZEQTIKUldTaWJYSlRwb3FnV2JjMGFmbzNGMVFVZ0dWVklNeHVpSnc3a3VYMUpVaUhURlBuMllhQ08xTHEK",
+      "endpoints": ["https://static.getastra.cn/AstraHerald/latest/latest.json"],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

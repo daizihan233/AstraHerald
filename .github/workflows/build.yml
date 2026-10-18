@@ -1,7 +1,7 @@
 # 每次向 main 推送都会发一版：算滚动版本号 -> 打 NSIS 安装包 -> 发 GitHub Release -> 上传 OSS。
 # 版本号格式 YYYYMM.D.N（例 202510.2.40 = 2025-10-02 的第 40 次构建），N 用 workflow run number。
-# 参考同组织的 AstraSchedule/desktop 的 build.yml，只是 Tauri 只有 x64 单通道、
-# 元数据不是 latest.yml/win10.yml（自动更新还没接，见文件末尾的 ponytail 备注）。
+# 参考同组织的 AstraSchedule/desktop 的 build.yml，只是 Tauri 只有 x64 单通道，
+# 自动更新的元数据是 OSS 上的 latest.json（安装包本身由 tauri 签名，另可出 zip 形式）。
 name: Rolling Build & Publish
 
 on:
@@ -40,7 +40,7 @@ jobs:
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
       ENDPOINT: https://cn-nb1.rains3.com
-      BUCKET: yanmo-objects
+      BUCKET: kuohu-objects
       PREFIX: AstraHerald/
     steps:
       - name: Checkout code
@@ -86,19 +86,66 @@ jobs:
           Write-Host "Version: $ver"
 
 
-      - name: Build NSIS installer
+      - name: Build NSIS installer (with signed updater artifacts)
+        env:
+          # 私钥存在仓库 Secret（内容就是 .secrets/updater.key 的文本）。密码留空也要显式传，
+          # 否则 tauri 会交互式提问，在 CI 里直接挂住。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun x tauri build --bundles nsis
 
-      - name: Collect installer and stable alias
+      - name: Collect installer, updater bundle and latest.json
         shell: pwsh
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          $installer = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -File -Filter '*-setup.exe' | Select-Object -First 1
+          $ver = '${{ needs.version.outputs.ver }}'
+          $dir = 'src-tauri/target/release/bundle/nsis'
+          $installer = Get-ChildItem -Path $dir -File -Filter '*-setup.exe' | Select-Object -First 1
           if (-not $installer) { Write-Error '没有找到 NSIS 安装包'; exit 1 }
+          # 自动更新的产物由 tauri 的签名步骤产生：当前 CLI 直接签安装包本身（...setup.exe.sig），
+          # 有的版本会另打一个 zip（...setup.exe.zip / .nsis.zip）。updater 两种都吃（zip 会解压取里面的 exe），
+          # 谁在就用谁——url 与 signature 必须指向同一份产物。
+          $zip = Get-ChildItem -Path $dir -File | Where-Object { $_.Name -like '*-setup*.zip' } | Select-Object -First 1
+          if ($zip) {
+            $payload = $zip.Name
+            $sigPath = $zip.FullName + '.sig'
+          } else {
+            $payload = $installer.Name
+            $sigPath = $installer.FullName + '.sig'
+          }
+          $sig = Get-Content $sigPath -Raw
+          if (-not $sig) { Write-Error "没有找到自动更新的签名：$sigPath（createUpdaterArtifacts 打开了吗）"; exit 1 }
+
           New-Item -ItemType Directory -Path 'dist-release' -Force | Out-Null
           Copy-Item $installer.FullName 'dist-release/'
+          Copy-Item ($installer.FullName + '.sig') 'dist-release/'
+          if ($zip) {
+            Copy-Item $zip.FullName 'dist-release/'
+            Copy-Item ($zip.FullName + '.sig') 'dist-release/'
+          }
           # 固定名字的别名：官网/注册中心的永久下载链接用这个，内容每次覆盖
           Copy-Item $installer.FullName 'dist-release/AstraHeraldInstaller.exe'
+
+          # 客户端自动更新读这个文件：latest/ 里的产物地址 + 签名 + 版本。
+          # 域名是 ESA 加速的静态域名，换镜像只要改这一处。
+          $notes = ($env:COMMIT_MSG -split "\n")[0].Trim()
+          if (-not $notes) { $notes = "AstraHerald $ver" }
+          $latest = [ordered]@{
+            version   = $ver
+            notes     = $notes
+            pub_date  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd\THH:mm:ss\Z')
+            platforms = [ordered]@{
+              'windows-x86_64' = [ordered]@{
+                signature = $sig.Trim()
+                url       = "https://static.getastra.cn/" + $env:PREFIX + "latest/" + $payload
+              }
+            }
+          }
+          # 必须无 BOM：updater 把这个文件当纯 JSON 解析。
+          $latest | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8NoBOM 'dist-release/latest.json'
           Write-Host "$($installer.Name)  $([math]::Round($installer.Length / 1MB, 2)) MB"
+          Write-Host "updater payload: $payload（签名 $sigPath）"
 
       - name: Publish GitHub Release
         shell: pwsh
@@ -152,7 +199,7 @@ jobs:
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
       ENDPOINT: https://cn-nb1.rains3.com
-      BUCKET: yanmo-objects
+      BUCKET: kuohu-objects
       PREFIX: AstraHerald/latest/
     steps:
       - name: Checkout code
@@ -183,20 +230,23 @@ jobs:
         run: |
           $ver = '${{ needs.version.outputs.ver }}'
           $prefix = $env:PREFIX
-          $keep = @("${prefix}AstraHerald_${ver}_x64-setup.exe", "${prefix}AstraHeraldInstaller.exe")
+          # 本版本自己的产物——安装包、自动更新用的 zip（若有）、各种 .sig——名字里都有 AstraHerald_<ver>，
+          # 加上固定名字的别名与 latest.json，其余对象（上一版的残留）全部删掉。
+          $keepPrefix = "AstraHerald_$ver"
+          $keep = @('AstraHeraldInstaller.exe', 'latest.json')
           $listed = aws s3api list-objects-v2 --bucket $env:BUCKET --prefix $prefix --endpoint-url $env:ENDPOINT --query 'Contents[].Key' --output text
           if ($LASTEXITCODE -ne 0) { Write-Error '列出 latest/ 对象失败'; exit $LASTEXITCODE }
           $keys = @($listed -split '\s+') | Where-Object { $_ -and $_ -ne 'None' }
           Write-Host "Current version: $ver"
           foreach ($key in $keys) {
-            if ($key -notmatch '\.exe$') { Write-Host "keep (not a release artifact): $key"; continue }
-            if ($keep -contains $key) { Write-Host "keep: $key"; continue }
+            $name = $key.Substring($prefix.Length)
+            if ($keep -contains $name -or $name.StartsWith($keepPrefix)) { Write-Host "keep: $key"; continue }
             Write-Host "delete: $key"
             aws s3 rm "s3://$env:BUCKET/$key" --endpoint-url $env:ENDPOINT
             if ($LASTEXITCODE -ne 0) { Write-Error "删除 $key 失败"; exit $LASTEXITCODE }
           }
           Write-Host "OSS $env:PREFIX 现在只保留 $ver 的产物"
 
-# ponytail: 自动更新（tauri-plugin-updater + latest.json + 签名）还没接，
-# 所以这里只发安装包；接的时候在 build 步骤加 TAURI_SIGNING_PRIVATE_KEY、
-# 打开 tauri.conf.json 的 bundle.createUpdaterArtifacts，再把 latest.json/.sig 一起传 OSS。
+# 客户端自动更新读 https://static.getastra.cn/AstraHerald/latest/latest.json（ESA 加速的静态域名）。
+# 换镜像/换域名要同时改这里与 src-tauri/tauri.conf.json 的 plugins.updater.endpoints。
+# 签名私钥不进仓库：.secrets/updater.key 是本地那一份，CI 用 repo secrets。

@@ -226,6 +226,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 自动更新：查 OSS 上的 latest.json（tauri.conf.json 的 plugins.updater），
+        // 安装包用 minisign 签名，验不过就不装。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
