@@ -96,7 +96,9 @@ fn deliver(
     // （连不上就用配置里的「默认状态」），窗口状态来自前台窗口（win.rs）。
     let (period, state, action) = crate::schedule::current_scene(config);
     // 决策依据必须留下：真机排查「怎么走成侧通知了」全看这一行。
-    eprintln!(
+    // 必须走 log 而不是 eprintln!：GUI 版没有控制台，stderr 没人接，只有 log 才落进 app.log
+    // （安装版更明显——用户报「上课怎么还弹」时，这一行是唯一能证明 app 当时认为是什么状态的证据）。
+    log::info!(
         "{kind}：{} / {} → {}",
         period.label(),
         state.label(),
@@ -113,6 +115,9 @@ fn deliver(
             crate::defer::push(text.to_string(), sender.to_string(), replies, target, history_id);
             true
         }
+        // 忽略：这条消息只进聊天记录（上面的 history::record 已经记过了），不弹任何提醒。
+        // 返回 false = 「这次没有展示」，调用方（聊天记录重放）据此不重复计数。
+        SceneAction::Ignore => false,
     }
 }
 

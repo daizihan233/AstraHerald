@@ -122,11 +122,23 @@ impl Default for Config {
 pub struct SideSettings {
     /// 显示多少秒后自动收起。太短看不清、太长会一直挂在屏幕上，两头都夹一下。
     pub duration_secs: u64,
+    /// 正文字号（逻辑像素）。屏幕上全是代码/表格的时候 17px 确实偏小，所以给个口子。
+    pub font_size_px: u32,
+    /// 昵称（发送者那一行）字号，和正文分开调：那行是次要信息，通常比正文小一号。
+    pub nick_font_px: u32,
+    /// 最多同时在屏幕上挂几条侧通知。满了以后再来的就把最早那条的窗口原地换成新内容，
+    /// 不会一直往上堆（见 notice.rs 的 SidePanel::push）。
+    pub max_count: usize,
 }
 
 impl Default for SideSettings {
     fn default() -> Self {
-        Self { duration_secs: 15 }
+        Self {
+            duration_secs: 15,
+            font_size_px: 17,
+            nick_font_px: 15,
+            max_count: 3,
+        }
     }
 }
 
@@ -134,9 +146,40 @@ impl SideSettings {
     /// 秒数夹到 3..=300：写 0 会瞬间消失、写 100000 等于永不收起。
     pub const MIN_SECS: u64 = 3;
     pub const MAX_SECS: u64 = 300;
+    /// 字号夹到 12..=40：比这更小看不清，比这更大一条通知就占掉半个屏幕。
+    pub const MIN_FONT_PX: u32 = 12;
+    pub const MAX_FONT_PX: u32 = 40;
+    /// 条数夹到 1..=10：0 条会让「场景矩阵选侧通知」变成什么都不显示，
+    /// 10 条以上屏幕上就只剩通知了。每条是一个常驻窗口，也不宜再多。
+    pub const MIN_COUNT: usize = 1;
+    pub const MAX_COUNT: usize = 10;
+
+    pub fn clamp_secs(secs: u64) -> u64 {
+        secs.clamp(Self::MIN_SECS, Self::MAX_SECS)
+    }
+
+    pub fn clamp_font(px: u32) -> u32 {
+        px.clamp(Self::MIN_FONT_PX, Self::MAX_FONT_PX)
+    }
+
+    pub fn clamp_count(count: usize) -> usize {
+        count.clamp(Self::MIN_COUNT, Self::MAX_COUNT)
+    }
 
     pub fn clamped_secs(&self) -> u64 {
-        self.duration_secs.clamp(Self::MIN_SECS, Self::MAX_SECS)
+        Self::clamp_secs(self.duration_secs)
+    }
+
+    pub fn clamped_font_px(&self) -> u32 {
+        Self::clamp_font(self.font_size_px)
+    }
+
+    pub fn clamped_nick_font_px(&self) -> u32 {
+        Self::clamp_font(self.nick_font_px)
+    }
+
+    pub fn clamped_count(&self) -> usize {
+        Self::clamp_count(self.max_count)
     }
 }
 
@@ -179,6 +222,20 @@ pub struct OnebotSettings {
     pub port: String,
     pub path: String,
     pub access_token: String,
+    /// 托盘「连接配置」打开的地址：框架自己的网页端（SnowLuma 的 WebUI 在 5099）。
+    /// 空串 = 用 `DEFAULT_WEBUI_URL`。
+    pub webui_url: String,
+}
+
+/// 托盘「连接配置」默认打开的地址：连接服务自己的网页端（SnowLuma WebUI 默认端口）。
+pub const DEFAULT_WEBUI_URL: &str = "http://127.0.0.1:5099";
+
+impl OnebotSettings {
+    /// 「连接配置」该打开的地址：配置里填过就用填的，留空用默认。
+    pub fn webui_url(&self) -> &str {
+        let typed = self.webui_url.trim();
+        if typed.is_empty() { DEFAULT_WEBUI_URL } else { typed }
+    }
 }
 
 /// 文件消息策略：三类桶，后缀名小写、不带点。
@@ -216,7 +273,7 @@ pub struct SceneSettings {
     pub after_class: SceneRow,
 }
 
-/// 产品定的默认场景：上课时只有全屏要延后至下课、其余一律侧通知；
+/// 产品定的默认场景：上课时全屏忽略（只看聊天记录、不弹提醒），其余一律侧通知；
 /// 下课时全屏侧通知、其余强提醒。
 ///
 /// 这里不能省成 derive(Default)——那会给出八个空格子，等于让用户第一次
@@ -224,10 +281,10 @@ pub struct SceneSettings {
 /// 是同一份数据，改一边必须改另一边。
 impl Default for SceneSettings {
     fn default() -> Self {
-        use SceneAction::{Postpone, Side, Strong};
+        use SceneAction::{Ignore, Side, Strong};
         Self {
             in_class: SceneRow {
-                fullscreen: Some(Postpone),
+                fullscreen: Some(Ignore),
                 maximized: Some(Side),
                 unfocused: Some(Side),
                 desktop: Some(Side),
@@ -266,6 +323,11 @@ pub enum SceneAction {
     Side,
     /// 延后至下课。只对 `SceneSettings::in_class` 有定义。
     Postpone,
+    /// 忽略：只把消息记进聊天记录，不弹任何提醒。
+    ///
+    /// 全屏看片、开会投屏这类「知道了也别打断我」的场合配这一格：
+    /// 消息照样进托盘「聊天记录」，回头能翻、能重放。
+    Ignore,
 }
 
 impl SceneAction {
@@ -274,6 +336,7 @@ impl SceneAction {
             SceneAction::Strong => "强提醒",
             SceneAction::Side => "侧通知",
             SceneAction::Postpone => "延后至下课",
+            SceneAction::Ignore => "忽略",
         }
     }
 }
@@ -419,11 +482,17 @@ impl Config {
                 .filter(|qq| qq.parse::<i64>().is_err())
                 .cloned(),
         );
-        if bad.is_empty() {
-            Ok(())
-        } else {
-            Err(format!("不是纯数字 QQ 号：{}", bad.join("、")))
+        if !bad.is_empty() {
+            return Err(format!("不是纯数字 QQ 号：{}", bad.join("、")));
         }
+        // 只挡「填了但不是个地址」的情况：留空 = 用默认地址，不算错。
+        let webui = self.onebot.webui_url();
+        if !webui.starts_with("http://") && !webui.starts_with("https://") {
+            return Err(format!(
+                "连接服务网页端地址要以 http:// 或 https:// 开头：{webui}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -472,7 +541,7 @@ mod tests {
     #[test]
     fn default_config_round_trips() {
         let back: Config = serde_json::from_str(&serde_json::to_string(&Config::default()).unwrap()).unwrap();
-        assert_eq!(back.scene.in_class.fullscreen, Some(SceneAction::Postpone));
+        assert_eq!(back.scene.in_class.fullscreen, Some(SceneAction::Ignore));
         assert_eq!(back.scene.after_class.desktop, Some(SceneAction::Strong));
         assert_eq!(back.quick_replies, Config::default().quick_replies);
         assert!(back.autostart);
@@ -504,7 +573,7 @@ mod tests {
     #[test]
     fn scene_defaults_match_spec() {
         let scene = SceneSettings::default();
-        assert_eq!(scene.in_class.fullscreen, Some(SceneAction::Postpone));
+        assert_eq!(scene.in_class.fullscreen, Some(SceneAction::Ignore));
         assert_eq!(scene.in_class.maximized, Some(SceneAction::Side));
         assert_eq!(scene.in_class.unfocused, Some(SceneAction::Side));
         assert_eq!(scene.in_class.desktop, Some(SceneAction::Side));
@@ -532,7 +601,7 @@ mod tests {
         let mut config = Config::default();
         assert_eq!(
             config.current_action(ScenePeriod::InClass, WindowState::Fullscreen),
-            SceneAction::Postpone
+            SceneAction::Ignore
         );
         assert_eq!(
             config.current_action(ScenePeriod::AfterClass, WindowState::Desktop),
@@ -558,6 +627,21 @@ mod tests {
         // 落盘形状里 default_period 就在顶层。
         let json = serde_json::to_string(&Config::default()).unwrap();
         assert!(json.contains("\"default_period\":\"in_class\""), "{json}");
+    }
+
+    /// 「连接配置」地址：留空（老配置 / 手写配置）用默认，填了以填的为准；填坏了写入前挡下来。
+    #[test]
+    fn webui_url_falls_back_to_default_and_rejects_garbage() {
+        let mut config = Config::default();
+        assert_eq!(config.onebot.webui_url(), DEFAULT_WEBUI_URL);
+        config.onebot.webui_url = "   ".to_string();
+        assert_eq!(config.onebot.webui_url(), DEFAULT_WEBUI_URL);
+        config.onebot.webui_url = " http://192.168.1.5:5099 ".to_string();
+        assert_eq!(config.onebot.webui_url(), "http://192.168.1.5:5099");
+        assert!(config.validate().is_ok());
+        // 少了协议头就没法当窗口地址用，宁可报错也别让托盘菜单点出个空窗口。
+        config.onebot.webui_url = "127.0.0.1:5099".to_string();
+        assert!(config.validate().is_err());
     }
 
     #[test]

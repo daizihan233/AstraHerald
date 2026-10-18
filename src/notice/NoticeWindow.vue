@@ -19,8 +19,6 @@ const messages = ref([]);
 const replyError = ref("");
 // 正在发送的那条，形如 "12|收到"；发送期间不接受第二次点击。
 const sending = ref("");
-// 哪一列的候选菜单展开了（存 sender；一列只有一条消息时才有菜单）。
-const openMenu = ref("");
 const fontSize = ref(32);
 let unlisten = null;
 
@@ -41,7 +39,6 @@ async function refresh() {
   messages.value = Array.isArray(rest) ? rest : [];
   replyError.value = "";
   sending.value = "";
-  openMenu.value = "";
 }
 
 function zoomBy(delta) {
@@ -65,7 +62,6 @@ async function sendReply(message, reply) {
   if (sending.value) return;
   sending.value = key;
   replyError.value = "";
-  openMenu.value = "";
   try {
     const rest = await invoke("notice_reply", { id: message.id, reply });
     // 发出去了才收窗；失败就留在窗口里让用户看见原因。
@@ -99,7 +95,19 @@ onBeforeUnmount(() => {
       <!-- 同一人的消息合成一列：一条就单列满屏，多条就并排分栏。 -->
       <div class="notice__groups">
         <section v-for="group in groups" :key="group.sender" class="notice__group">
-          <header v-if="group.sender" class="notice__bar">{{ group.sender }}</header>
+          <header v-if="group.sender || groups.length > 1" class="notice__bar">
+            <span class="notice__bar-name">{{ group.sender }}</span>
+            <!-- 只有一列时关掉它等于关窗，那交给右下角那颗；分栏了才需要单独收掉某一列。 -->
+            <n-button
+              v-if="groups.length > 1"
+              size="tiny"
+              quaternary
+              aria-label="关闭这一列提醒"
+              @click="closeColumn(group.sender)"
+            >
+              ✕
+            </n-button>
+          </header>
 
           <div class="notice__body">
             <article
@@ -110,11 +118,8 @@ onBeforeUnmount(() => {
             >
               <p class="notice__text" :style="{ fontSize: fontSize + 'px' }">{{ message.text }}</p>
 
-              <!-- 一列里有多条消息时，浮动菜单指不清回哪条，改成每条下面并排内联按钮。 -->
-              <div
-                v-if="group.messages.length > 1 && message.replies.length"
-                class="notice__replies"
-              >
+              <!-- 候选回复跟着它那条消息：浮动菜单指不清回哪条，一律排在消息下面。 -->
+              <div v-if="message.replies.length" class="notice__replies">
                 <n-button
                   v-for="reply in message.replies"
                   :key="reply"
@@ -130,79 +135,45 @@ onBeforeUnmount(() => {
             </article>
           </div>
 
-          <!-- 每列自己一组按钮：A+/A− 是整窗的，✕ 只关这一列。
-               position=absolute 是相对自己这一列定位，分栏时几组按钮才不会叠在一起。 -->
-          <n-float-button-group shape="circle" position="absolute" :right="20" :bottom="20">
-            <n-float-button
-              v-if="group.messages.length === 1 && group.messages[0].replies.length"
-              menu-trigger="click"
-              :show-menu="openMenu === group.sender"
-              tabindex="0"
-              :aria-label="'选择候选回复'"
-              :aria-expanded="openMenu === group.sender ? 'true' : 'false'"
-              @update:show-menu="(v) => { openMenu = v ? group.sender : '' }"
-              @keydown.enter="openMenu = openMenu === group.sender ? '' : group.sender"
-              @keydown.space.prevent="openMenu = openMenu === group.sender ? '' : group.sender"
-            >
-              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
-                <path
-                  fill="currentColor"
-                  d="M8 1.5c-3.6 0-6.5 2.3-6.5 5.2 0 1.7.9 3.2 2.4 4.2l-.5 3.6 3.3-1.7c.4.1.9.1 1.3.1 3.6 0 6.5-2.3 6.5-5.2S11.6 1.5 8 1.5z"
-                />
-              </svg>
-              <template #menu>
-                <div class="notice__menu">
-                  <n-button
-                    v-for="reply in group.messages[0].replies"
-                    :key="reply"
-                    block
-                    quaternary
-                    :loading="sending === group.messages[0].id + '|' + reply"
-                    :aria-label="'回复：' + reply"
-                    @click="sendReply(group.messages[0], reply)"
-                  >
-                    <span class="notice__menu-text">{{ reply }}</span>
-                  </n-button>
-                </div>
-              </template>
-            </n-float-button>
-
-            <!-- naive-ui 的 FloatButton 没有 disabled 这个 prop，只能自己表达边界 + 收键盘。 -->
-            <n-float-button
-              :class="{ 'is-limit': fontSize >= MAX_FONT }"
-              :aria-disabled="fontSize >= MAX_FONT"
-              tabindex="0"
-              aria-label="放大字号"
-              @click="zoomBy(FONT_STEP)"
-              @keydown.enter="zoomBy(FONT_STEP)"
-              @keydown.space.prevent="zoomBy(FONT_STEP)"
-            >
-              A+
-            </n-float-button>
-            <n-float-button
-              :class="{ 'is-limit': fontSize <= MIN_FONT }"
-              :aria-disabled="fontSize <= MIN_FONT"
-              tabindex="0"
-              aria-label="缩小字号"
-              @click="zoomBy(-FONT_STEP)"
-              @keydown.enter="zoomBy(-FONT_STEP)"
-              @keydown.space.prevent="zoomBy(-FONT_STEP)"
-            >
-              A−
-            </n-float-button>
-            <n-float-button
-              type="error"
-              tabindex="0"
-              :aria-label="groups.length > 1 ? '关闭这一列提醒' : '关闭窗口'"
-              @click="groups.length > 1 ? closeColumn(group.sender) : closeWindow()"
-              @keydown.enter="groups.length > 1 ? closeColumn(group.sender) : closeWindow()"
-              @keydown.space.prevent="groups.length > 1 ? closeColumn(group.sender) : closeWindow()"
-            >
-              ✕
-            </n-float-button>
-          </n-float-button-group>
         </section>
       </div>
+
+      <!-- 字号是整窗共用的一份（分栏时也一样），所以整窗只留这一组按钮；✕ 收起整个提醒窗。 -->
+      <n-float-button-group shape="circle" :right="20" :bottom="20">
+        <!-- naive-ui 的 FloatButton 没有 disabled，只能自己表达边界 + 收键盘。 -->
+        <n-float-button
+          :class="{ 'is-limit': fontSize >= MAX_FONT }"
+          :aria-disabled="fontSize >= MAX_FONT"
+          tabindex="0"
+          aria-label="放大字号"
+          @click="zoomBy(FONT_STEP)"
+          @keydown.enter="zoomBy(FONT_STEP)"
+          @keydown.space.prevent="zoomBy(FONT_STEP)"
+        >
+          A+
+        </n-float-button>
+        <n-float-button
+          :class="{ 'is-limit': fontSize <= MIN_FONT }"
+          :aria-disabled="fontSize <= MIN_FONT"
+          tabindex="0"
+          aria-label="缩小字号"
+          @click="zoomBy(-FONT_STEP)"
+          @keydown.enter="zoomBy(-FONT_STEP)"
+          @keydown.space.prevent="zoomBy(-FONT_STEP)"
+        >
+          A−
+        </n-float-button>
+        <n-float-button
+          type="error"
+          tabindex="0"
+          aria-label="关闭窗口"
+          @click="closeWindow"
+          @keydown.enter="closeWindow"
+          @keydown.space.prevent="closeWindow"
+        >
+          ✕
+        </n-float-button>
+      </n-float-button-group>
 
       <p v-if="replyError" class="notice__reply-error">{{ replyError }}</p>
     </div>
@@ -244,7 +215,11 @@ body {
 /* 顶栏：这一列是谁发的。同一列多条消息也只出现一次。 */
 .notice__bar {
   flex: none;
-  padding: 16px 28px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px 14px 28px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.28);
   font-size: 15px;
   font-weight: 500;
@@ -254,16 +229,21 @@ body {
 }
 
 /* 正文区：消息少时整块居中（和以前单条提醒的观感一致），多了自己滚。
-   右边留 88px 给固定按钮列（40px 宽 + 20px 右距 + 一点间隙）；
-   底部留 228px 给最多 4 个圆叠起来（4*40 + 3*16 + 20）。 */
+   右边和底部给右下角那一组固定按钮（40px 的圆 + 20px 边距）让位，
+   别让最后一行钻到按钮底下。 */
 .notice__body {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 24px 88px 228px 28px;
+  padding: 24px 88px 96px 28px;
   overflow-y: auto;
+}
+
+/* 顶栏里那一列是谁发的：长昵称会折行，右边的 ✕ 不跟着跑。 */
+.notice__bar-name {
+  min-width: 0;
 }
 
 /* 同一列里的第二条起：画一条横分割线，免得两条消息粘在一起读不出边界。 */
@@ -312,43 +292,6 @@ body {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
-}
-
-/* 候选回复菜单：跟着气泡按钮一起进 group，右缘对齐按钮右缘（默认会往右溢出窗口）。 */
-.notice .n-float-button__menu {
-  right: 0;
-}
-
-/* 选择器带 .notice 是为了盖过 naive-ui 那条「.n-float-button__menu > * { margin-bottom:16px }」，
-   否则菜单底部会多出 16px，在 320px 高的窗口里正好把第一项顶出屏幕。 */
-.notice .notice__menu {
-  display: flex;
-  flex-direction: column;
-  /* 和 group 里四个圆的间距保持一致。 */
-  gap: 16px;
-  min-width: 120px;
-  /* 触发按钮上方真正可用的高度：窗口高 - 按钮列 248 - 顶栏那一圈 40。 */
-  max-height: max(140px, calc(100vh - 288px));
-  margin-bottom: 0;
-  overflow-y: auto;
-  padding: 8px;
-  border: 1px solid rgba(128, 128, 128, 0.28);
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-}
-
-.notice--dark .notice__menu {
-  border-color: rgba(255, 255, 255, 0.14);
-  background: rgb(28, 28, 32);
-}
-
-.notice__menu-text {
-  display: block;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 发送失败：贴在底部偏左，给右边那一列按钮让出位置（右留 96px）。 */

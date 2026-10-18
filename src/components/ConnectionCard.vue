@@ -124,6 +124,18 @@ function clear() {
           留空的项每次启动时从框架配置里读（token 也跟着走，不用手抄）；填了就以这里为准。
         </span>
       </div>
+
+      <div class="row">
+        <span class="row__label">连接服务网页端</span>
+        <n-input
+          v-model:value="onebot.webui_url"
+          placeholder="http://127.0.0.1:5099"
+          aria-label="连接服务网页端地址"
+        />
+        <span class="hint">
+          托盘菜单「连接配置」打开的就是这个地址（框架自己的管理界面，比如 SnowLuma 的 WebUI）。
+        </span>
+      </div>
     </div>
   </n-card>
 </template>

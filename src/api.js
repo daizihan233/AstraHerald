@@ -29,10 +29,12 @@ export function connectionStatus() {
   return invoke("connection_status");
 }
 
-/// 让后端弹一条侧通知样品（场景设置卡片右上角那个按钮）：
+/// 让后端弹一条侧通知样品（「侧通知」卡片里那个按钮）：
 /// 不经过 bot，也用不着真的收到一条私聊。
-export function previewSideNotice() {
-  return invoke("notice_preview_side");
+/// font（正文）/ nickFont（昵称）/ secs 传配置页里当前的值（可能还没保存），
+/// 预览的就是马上要生效的样子；不传就用落盘配置里的值。
+export function previewSideNotice({ font, nickFont, secs } = {}) {
+  return invoke("notice_preview_side", { font, nick_font: nickFont, secs });
 }
 /// 聊天记录：最近 500 条文字消息，最新的在前。
 export function historyList() {

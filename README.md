@@ -48,15 +48,18 @@ QQ Hook 与 OneBot 11 网关由你自备的框架承担，本应用不随包发�
    在 JSON 里按语义找 `wsServers` / `websocketServers` 数组（不写死路径，各家嵌套层数不一样），
    键名认 `accessToken` 和 `token` 两种。单个文件超过 256 KB、或超过 40 个文件就放弃
 4. 读不到连接参数就回落到 kovi.conf.toml，再不行用 127.0.0.1:3001
-5. 配置旁边若有 config/runtime.json，只把 hookAutoLoad 改成 true——SnowLuma 自动生成的是 false，
-   不改就 Hook 不上 QQ、一条消息都收不到；别的字段一个不动
+5. 框架自己的配置本应用一个字都不写。Hook 自动加载（SnowLuma 的 hookAutoLoad）原版是 false，
+   不开就 Hook 不上 QQ、一条消息都收不到——我们只在日志里提醒一句，要无人值守就在启动框架前设
+   `SNOWLUMA_HOOK_AUTOLOAD=1`（见本仓库外的 deploy.bat），或者去框架自己的 WebUI 里打开
 6. 端口已经有人在听就直接用现成的那份；没人听才拉起子进程，退出时收掉（只收自己拉起的那个）
 
 读出来的 WS path 会去掉尾部斜杠（SnowLuma 写的是 "/"，原样交给 kovi 会拼成 ws://host:port//api → HTTP 400）。
 
 启动 .mjs/.js/.cjs 时优先用同目录自带的 node.exe，没有才找 PATH 里的 node；.bat/.cmd 走 cmd /C。
-框架自己的 EULA 确认、扫码登录还是它自己的流程（本应用带了 SnowLuma 那两个无人值守环境变量，
-别的框架会忽略），本应用只在后台把它拉起来。
+框架自己的 EULA 确认、扫码登录还是它自己的流程：本应用不代你同意任何协议、也不替框架改配置，
+拉起子进程时一个环境变量都不设。无人值守要用的那几个变量（SnowLuma 的 `SNOWLUMA_ACCEPT_EULA` /
+`SNOWLUMA_ACCEPT_PRIVACY` / `SNOWLUMA_HOOK_AUTOLOAD`）由启动框架的人在启动前自己设，
+deploy.bat 就是这么做的——跑那个脚本的是你，所以同意条款的也是你。
 
 ## 场景矩阵
 

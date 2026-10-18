@@ -17,6 +17,19 @@ use std::time::Duration;
 
 /// 状态接口地址，与 AstraSchedule/desktop 的 main/status-server.js 保持一致。
 const STATUS_ADDR: &str = "127.0.0.1:3011";
+
+/// 真正去连的地址。dev 构建允许用 ASTRA_HERALD_STATUS_ADDR 顶掉它：真课表服务当前是
+/// 「下课」时，只有这样才能验「上课 + 延后至下课」那条路。发布版不看这个变量。
+fn status_addr() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(addr) = std::env::var("ASTRA_HERALD_STATUS_ADDR") {
+        let addr = addr.trim();
+        if !addr.is_empty() {
+            return addr.to_string();
+        }
+    }
+    STATUS_ADDR.to_string()
+}
 const STATUS_PATH: &str = "/status";
 /// 课程清单接口（同一个服务，见 AstraSchedule/desktop 的 main/status-server.js）。
 const SUBJECTS_PATH: &str = "/subjects";
@@ -55,11 +68,21 @@ pub fn current_scene(config: &Config) -> (ScenePeriod, WindowState, SceneAction)
 /// （「延后至下课」的出口不只在状态翻转那一刻，窗口状态变了同样算离开那一格）。
 pub fn start_watch() {
     std::thread::spawn(|| {
+        // 只在状态翻转时打一行日志（每 2s 一条会把 app.log 淹掉）。
+        let mut logged_code = u8::MAX;
         loop {
             let next = fetch_status().and_then(|body| period_from_status(&body));
+            let code = period_to_code(next);
             // 先记「通不通」再记「什么状态」：后者要把 next 消费掉。
             LIVE.store(next.is_some(), Ordering::Relaxed);
-            LAST_CODE.store(period_to_code(next), Ordering::Relaxed);
+            LAST_CODE.store(code, Ordering::Relaxed);
+            if code != logged_code {
+                logged_code = code;
+                match code_to_period(code) {
+                    Some(p) => log::info!("课表状态：{}（来自 /status）", p.label()),
+                    None => log::info!("课表状态：读不到 /status，提醒按配置里的默认状态算"),
+                }
+            }
             crate::defer::release_ready();
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -88,7 +111,8 @@ fn fetch_status() -> Option<String> {
 }
 
 fn http_get(path: &str) -> Option<String> {
-    let addr = STATUS_ADDR.to_socket_addrs().ok()?.next()?;
+    let host = status_addr();
+    let addr = host.to_socket_addrs().ok()?.next()?;
     let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
@@ -97,7 +121,7 @@ fn http_get(path: &str) -> Option<String> {
     // 所以 read_to_end 会正常收尾，不用自己解分块编码。
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: {STATUS_ADDR}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     )
     .ok()?;
 

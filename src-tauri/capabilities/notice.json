@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "notice",
   "description": "提醒窗口（强提醒 + 侧通知）与聊天记录窗口：收事件、回消息、隐藏自己",
-  "windows": ["notice", "notice-side-1", "notice-side-2", "notice-side-3", "history"],
+  "windows": ["notice", "notice-side-*", "history"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

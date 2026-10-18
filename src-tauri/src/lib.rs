@@ -17,14 +17,11 @@ mod win;
 /// 给 bot-only 这个独立二进制用：它不经过 GUI 的 run()，得自己钉工作目录。
 pub use config::anchor_to_data_dir;
 
-use config::{Config, CONFIG_PATH};
+use config::{Config, CONFIG_PATH, DEFAULT_WEBUI_URL};
 use tauri::Manager;
 
 /// 配置页窗口的 label，必须和 tauri.conf.json 里 app.windows[0].label 一致。
 const CONFIG_WINDOW_LABEL: &str = "main";
-
-/// 「连接配置」打开的地址：连接服务自己的网页端。
-const CONNECTION_CONFIG_URL: &str = "http://127.0.0.1:5099";
 
 /// 连接配置窗口的 label。和配置页一样，第二次点菜单时用它找回原来的窗口。
 const CONNECTION_WINDOW_LABEL: &str = "connection";
@@ -73,6 +70,8 @@ async fn save_config(config: Config) -> Result<(), String> {
     if let Some(bot) = notice::bot_handle() {
         utils::set_access_control(bot);
     }
+    // 侧通知「最多几条」改小之后立刻生效：把多出来的那几张收掉，不用等下一条消息才收敛。
+    notice::apply_side_limit();
     Ok(())
 }
 
@@ -105,9 +104,13 @@ fn show_connection_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         return Ok(());
     }
 
-    let url: tauri::Url = CONNECTION_CONFIG_URL
-        .parse()
-        .map_err(tauri::Error::InvalidUrl)?;
+    // 地址是配置项（配置页「连接配置」卡片里可改）；万一是填坏的，退回默认地址，别拒开窗口。
+    let configured = Config::load_or_create(CONFIG_PATH).onebot.webui_url().to_string();
+    let url: tauri::Url = configured.parse().or_else(|_| {
+        eprintln!("连接服务网页端地址不是合法 URL（{configured}），改用 {DEFAULT_WEBUI_URL}");
+        DEFAULT_WEBUI_URL.parse()
+    })
+    .map_err(tauri::Error::InvalidUrl)?;
     WebviewWindowBuilder::new(app, CONNECTION_WINDOW_LABEL, WebviewUrl::External(url))
         .data_directory(utils::webview_data_dir(app))
         .title("连接配置")
@@ -231,6 +234,14 @@ pub fn run() {
     let first_run = !std::path::Path::new(CONFIG_PATH).exists();
 
     tauri::Builder::default()
+        // 单实例：第二个进程在这儿就被拦下——插件（命名互斥体 + WM_COPYDATA）把参数转给
+        // 已经在跑的那个实例，然后自己 cleanup_before_exit + exit(0)（插件源码
+        // platform_impl\windows.rs:129-130）。回调跑在**第一个**实例里，所以顺手把配置页
+        // 叫出来：用户双击图标想要的就是那个窗口。
+        // 必须排在其它插件之前：第二个实例得在别的 setup 干活之前就退出去（插件文档要求）。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_config_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // 自动更新：查 OSS 上的 latest.json（tauri.conf.json 的 plugins.updater），
@@ -285,8 +296,8 @@ pub fn run() {
             autostart::sync(Config::load_or_create(CONFIG_PATH).autostart);
 
             // OneBot 框架（Hook QQ 转 OneBot 11）：用户在「连接配置」里指定启动文件后，
-            // 端口没人听才由本项目拉起子进程（顺带把 runtime.json 的 hookAutoLoad 修正为
-            // true，见 onebot.rs）。必须排在 bot 之前——bot 要连的就是它的 WS 端点。
+            // 端口没人听才由本项目拉起子进程；框架自己的配置一个字都不写（见 onebot.rs）。
+            // 必须排在 bot 之前——bot 要连的就是它的 WS 端点。
             onebot::ensure_running(&Config::load_or_create(CONFIG_PATH));
 
             // 关闭 = 隐藏。配置页只有托盘这一条入口，窗口真被销毁就再也叫不出来了。

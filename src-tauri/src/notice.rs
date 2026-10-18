@@ -34,6 +34,22 @@ pub struct NoticePayload {
     pub replies: Vec<String>,
 }
 
+/// 侧通知专用的负载：强提醒那套字段原样带上，另加两个只有侧通知用得上的显示参数。
+///
+/// 单独一个结构是为了不往 NoticePayload 里塞几个强提醒窗永远用不到的字段；
+/// serde 的 flatten 让前端拿到的 JSON 仍然是平的（payload.text / payload.font_px）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SidePayload {
+    #[serde(flatten)]
+    pub notice: NoticePayload,
+    /// 正文字号（逻辑像素）。页面用它设 --side-font，卡片里的尺寸都按 em 跟着走。
+    pub font_px: u32,
+    /// 昵称字号（逻辑像素）。单独一份：昵称那行不跟着正文等比缩放，各自调各自的。
+    pub nick_font_px: u32,
+    /// 自动收起时长（毫秒）。底部那条进度线按它跑，和 schedule_dismiss 是同一个值。
+    pub duration_ms: u64,
+}
+
 /// 点候选回复时要知道发给谁、引用哪条消息。
 ///
 /// 消息事件里现成就有（MsgEvent 的 user_id / message_id），随提醒一起存下来，
@@ -399,9 +415,17 @@ fn fit_to_screen(window: &tauri::WebviewWindow) {
 // 侧通知（侧提醒）：屏幕右上角的小卡片，到点自己收起来 —— 类似 naive-ui 的 Notification。
 // ---------------------------------------------------------------------------
 
-/// 侧通知窗口的 label 池。每个 label 一个常驻（隐藏）窗口，来回复用，
-/// 省掉「收到消息才建 WebView」那几百毫秒的空白。
-const SIDE_LABELS: [&str; 3] = ["notice-side-1", "notice-side-2", "notice-side-3"];
+/// 侧通知窗口 label 的前缀：notice-side-1、notice-side-2…… 每个 label 一个常驻窗口，
+/// 来回复用，省掉「收到消息才建 WebView」那几百毫秒的空白。
+///
+/// 池子多大是配置项（config.rs 的 SideSettings::max_count，1..=10）：窗口按需建、按需复用；
+/// capability 那边用 notice-side-* 一次覆盖整套（capabilities/notice.json）。
+const SIDE_LABEL_PREFIX: &str = "notice-side-";
+
+/// 第 index 个（从 0 数）侧通知窗口的 label。
+fn side_label(index: usize) -> String {
+    format!("{SIDE_LABEL_PREFIX}{}", index + 1)
+}
 
 /// 侧通知加载的页面，同样由 vite 的多页构建产出。
 const SIDE_PAGE: &str = "side.html";
@@ -409,35 +433,73 @@ const SIDE_PAGE: &str = "side.html";
 /// 窗口已经建好的时候，用这个事件把新内容推进去。
 const SIDE_EVENT: &str = "side:new";
 
+/// 收起一条的时候先发这个：页面收到就播退场动画，播完（SIDE_EXIT_MS 之后）才隐藏窗口。
+/// 直接 hide 是「啪」地一下消失，和进场动画完全不对称。前端 SideNotification.vue 听这个名字。
+const SIDE_EXIT_EVENT: &str = "side:exit";
+
+/// 退场动画的时长（毫秒）：动画播完才真正隐藏窗口。前端 EXIT_MS 是同一个数。
+const SIDE_EXIT_MS: u64 = 200;
+
+/// 重排时位置滑动的步数与每步间隔：10 × 16ms ≈ 160ms，带缓出。
+const SIDE_MOVE_STEPS: u32 = 10;
+const SIDE_MOVE_STEP_MS: u64 = 16;
+
+/// 位置滑动的代次：新的一次重排让上一次没走完的动画立刻收手（否则两个线程互相拽同一个窗口）。
+static RESTACK_GEN: AtomicU64 = AtomicU64::new(0);
+
 /// 卡片宽度、距屏幕边沿和条与条之间的留白（逻辑像素）。
 /// 宽度跟着字号一起放大过：360 太窄，17px 的正文一行放不下几个字。
 const SIDE_WIDTH: f64 = 400.0;
 const SIDE_MARGIN: f64 = 16.0;
 const SIDE_GAP: f64 = 12.0;
 
-/// 页面量出真实高度之前先按这个高度摆。
+/// 页面量出真实高度之前先按这个高度摆（逻辑像素）。
 const SIDE_FALLBACK_HEIGHT: u32 = 120;
+
+/// 页面报高度最迟等到这个时间。到点还没报就按估算高度先显示出来——页面万一出问题，
+/// 「永远不显示」比「先裁一刀再长高」更糟。
+const SIDE_SHOW_DEADLINE_MS: u64 = 700;
 
 /// 页面报上来的高度会被夹在这个区间：太矮文字挤成一团，太高就不像通知了。
 const SIDE_MIN_HEIGHT: f64 = 64.0;
 const SIDE_MAX_HEIGHT: f64 = 420.0;
 
-/// 自动收起的时间（配置页可改，见 config.rs 的 SideSettings）。
+/// 侧通知的显示参数（配置页可改，见 config.rs 的 SideSettings）。
 ///
-/// 侧通知页面里那条进度线用的是同一个值：它自己 invoke("get_config") 读 side.duration_secs。
-fn side_duration_ms() -> u64 {
-    let secs = crate::config::Config::load_or_create(crate::config::CONFIG_PATH)
-        .side
-        .clamped_secs();
-    secs * 1000
+/// 一次读齐：时长/字号随负载下发给页面，页面不用再自己读一次配置；条数只有后端用。
+#[derive(Clone, Copy)]
+struct SideOptions {
+    /// 自动收起的毫秒数。
+    duration_ms: u64,
+    /// 正文字号（逻辑像素）。
+    font_px: u32,
+    /// 昵称字号（逻辑像素）。
+    nick_font_px: u32,
+    /// 最多同时在屏幕上挂几条。
+    max: usize,
+}
+
+impl SideOptions {
+    fn load() -> Self {
+        let side = crate::config::Config::load_or_create(crate::config::CONFIG_PATH).side;
+        Self {
+            duration_ms: side.clamped_secs() * 1000,
+            font_px: side.clamped_font_px(),
+            nick_font_px: side.clamped_nick_font_px(),
+            max: side.clamped_count(),
+        }
+    }
 }
 
 /// 一条正在显示的侧通知。
 struct SideSlot {
     label: String,
-    /// 当前高度（物理像素），页面量好后通过 side_resize 报上来。
+    /// 当前高度（物理像素），页面量好后通过 side_resize 报上来。0 = 还没量到。
     height: u32,
-    payload: NoticePayload,
+    /// 这一代的卡片显示出来了没有。没量到高度之前窗口一直藏着：先按估算高度画出来、
+    /// 过二百来毫秒再长高一次，看着就是卡片被裁一刀又弹开。
+    shown: bool,
+    payload: SidePayload,
     /// 对应聊天记录里的哪一条：重放同一条时不重复弹卡片。
     history_id: Option<u64>,
 }
@@ -450,7 +512,10 @@ pub struct SideState {
 
 #[derive(Default)]
 struct SidePanel {
-    /// 从上到下的显示顺序：第一个贴着屏幕右上角。
+    /// 从上到下的显示顺序：第一个贴着屏幕右上角（最早的一条），新来的排在队尾。
+    ///
+    /// 排到队尾而不是插到队首：插队首会把已经在显示的几张卡整体往下推，每张都要
+    /// 重新定位 + 重画一遍——几条侧通知一起到的时候，那一下就是肉眼可见的一卡一卡。
     slots: Vec<SideSlot>,
     /// 每个 label「第几次显示」。自动收起的线程带着创建时的值回来，对不上就说明这条窗口
     /// 已经被复用成新消息了，不能再关。
@@ -459,13 +524,17 @@ struct SidePanel {
 }
 
 impl SidePanel {
-    /// 把一条新内容放到栈顶，返回要用的窗口 label、这一代的编号、以及被挤掉的那条。
+    /// 把一条新内容放到队尾，返回要用的窗口 label 和这一代的编号。
     fn push(
         &mut self,
         text: String,
         sender: String,
         history_id: Option<u64>,
-    ) -> Option<(String, u64, Option<String>)> {
+        font_px: u32,
+        nick_font_px: u32,
+        duration_ms: u64,
+        max: usize,
+    ) -> Option<(String, u64, Vec<String>)> {
         // 已经在右上角挂着的同一条聊天记录：不再弹第二张卡。
         if let Some(id) = history_id {
             if self.slots.iter().any(|slot| slot.history_id == Some(id)) {
@@ -475,28 +544,39 @@ impl SidePanel {
         self.seq += 1;
         // replies 恒空：侧通知不给候选回复（真回复请走强提醒窗）。这里留着这个字段是因为
         // 侧通知和强提醒共用 NoticePayload，拆开得不偿失。
-        let payload = NoticePayload {
-            id: self.seq,
-            text,
-            sender,
-            replies: Vec::new(),
+        let payload = SidePayload {
+            notice: NoticePayload {
+                id: self.seq,
+                text,
+                sender,
+                replies: Vec::new(),
+            },
+            font_px,
+            nick_font_px,
+            duration_ms,
         };
 
-        // 先找一个空着的窗口 label。
+        // 先找一个空着的窗口 label（池子就是第 1..=max 个）。
+        let max = max.max(1);
         let mut label = String::new();
-        for candidate in SIDE_LABELS {
+        for index in 0..max {
+            let candidate = side_label(index);
             if !self.slots.iter().any(|slot| slot.label == candidate) {
-                label = candidate.to_string();
+                label = candidate;
                 break;
             }
         }
 
-        // 三条都在显示：把最下面（最早）那条换掉。
-        let mut evicted = None;
+        // 池子满了：把最上面（最早）那条换掉，窗口留着复用、挪到队尾显示新内容。
+        //
+        // 复用要「原地换」：这个窗口此刻正显示着上一张卡，别把它藏起来再弹一次
+        // （藏掉到重新显示之间那段空白，用户看到的就是闪一下）。高度也留着，页面
+        // 报新高度之前先按旧高度摆，免得又走一遍估算高度那样一跳。
+        let mut carried = (0u32, false);
         if label.is_empty() {
-            let oldest = self.slots.pop().expect("侧通知栈不可能为空");
-            evicted = Some(oldest.label.clone());
+            let oldest = self.slots.remove(0);
             label = oldest.label;
+            carried = (oldest.height, oldest.shown);
         }
 
         let generation = {
@@ -504,16 +584,21 @@ impl SidePanel {
             *generation += 1;
             *generation
         };
-        self.slots.insert(
-            0,
-            SideSlot {
-                label: label.clone(),
-                height: SIDE_FALLBACK_HEIGHT,
-                payload,
-                history_id,
-            },
-        );
-        Some((label, generation, evicted))
+        self.slots.push(SideSlot {
+            label: label.clone(),
+            height: carried.0,
+            shown: carried.1,
+            payload,
+            history_id,
+        });
+
+        // 上限被配置改小之后，多出来的旧卡（队首那几张）现在就退役，屏幕上只留最新的
+        // max 条。刚推的这张在队尾，不会被收掉。
+        let mut dropped = Vec::new();
+        while self.slots.len() > max {
+            dropped.push(self.slots.remove(0).label);
+        }
+        Some((label, generation, dropped))
     }
 }
 
@@ -522,7 +607,7 @@ impl SidePanel {
 pub fn side_current(
     window: WebviewWindow,
     state: tauri::State<'_, SideState>,
-) -> Option<NoticePayload> {
+) -> Option<SidePayload> {
     let panel = state.inner.lock().expect("侧通知状态锁被 poison");
     let payload = panel
         .slots
@@ -532,25 +617,39 @@ pub fn side_current(
     payload
 }
 
-/// 页面量好高度后报上来：改窗口尺寸，再把这一列重排一遍。
+/// 页面量好高度后报上来：只有高度真的变了才改窗口尺寸、重排这一列。
 #[tauri::command]
 pub fn side_resize(height: f64, window: WebviewWindow, state: tauri::State<'_, SideState>) {
     let height = height.clamp(SIDE_MIN_HEIGHT, SIDE_MAX_HEIGHT);
     let scale = window.scale_factor().unwrap_or(1.0);
-    {
+    let physical = (height * scale).round() as u32;
+    let first_report = {
         let mut panel = state.inner.lock().expect("侧通知状态锁被 poison");
         match panel
             .slots
             .iter_mut()
             .find(|slot| slot.label == window.label())
         {
-            Some(slot) => slot.height = (height * scale).round() as u32,
+            // 已经显示出来的卡片，高度没变就别重排：页面每次挂载都会喊一声，白重排一次
+            // 就是三个窗口各重画一遍，这是多条侧通知一起到的时候卡顿的另一半原因。
+            Some(slot) if slot.shown && slot.height == physical => return,
+            Some(slot) => {
+                let first = !slot.shown;
+                slot.height = physical;
+                slot.shown = true;
+                first
+            }
             // 已经收起来了就别为一条不在栈上的窗口改尺寸。
             None => return,
         }
-    }
+    };
     let app = window.app_handle().clone();
     restack(&app);
+    // 第一份高度就是「卡片画完了」：尺寸已经摆好，这时候显示出来，用户看到的第一帧
+    // 就是最终样子。
+    if first_report {
+        let _ = window.show();
+    }
 }
 
 /// 卡片右上角的 ✕。
@@ -565,6 +664,17 @@ pub fn side_close(window: WebviewWindow) {
 /// 侧通知**不给**候选回复：它是一条从屏幕边上滑过的轻提醒，真回复请用强提醒窗
 /// （notice_reply）。这里只显示文字，所以不需要 ReplyTarget。
 pub fn show_side(text: &str, sender: &str, history_id: Option<u64>) -> bool {
+    show_side_configured(text, sender, history_id, &SideOptions::load())
+}
+
+/// 显示参数已经定下来的那一层：真消息用 `side_settings()` 读出来的值，
+/// 配置页的预览把输入框里（可能还没保存）的值直接传进来。
+fn show_side_configured(
+    text: &str,
+    sender: &str,
+    history_id: Option<u64>,
+    options: &SideOptions,
+) -> bool {
     let text = text.trim();
     if text.is_empty() {
         return false;
@@ -576,18 +686,25 @@ pub fn show_side(text: &str, sender: &str, history_id: Option<u64>) -> bool {
 
     // 锁里只记账：窗口操作（含 restack）都会回来抢这把锁。
     // 同一条聊天记录已经挂在右上角时 push 返回 None：不弹第二张卡。
-    let Some((label, generation, evicted)) = ({
+    let Some((label, generation, dropped)) = ({
         let state = app.state::<SideState>();
         let mut panel = state.inner.lock().expect("侧通知状态锁被 poison");
-        panel.push(text.to_string(), sender.trim().to_string(), history_id)
+        panel.push(
+            text.to_string(),
+            sender.trim().to_string(),
+            history_id,
+            options.font_px,
+            options.nick_font_px,
+            options.duration_ms,
+            options.max,
+        )
     }) else {
         return false;
     };
 
-    if let Some(evicted) = evicted {
-        if let Some(window) = app.get_webview_window(&evicted) {
-            let _ = window.hide();
-        }
+    // 上限改小之后被挤掉的那几张：窗口收起来（留着复用），下面的补上来。
+    for stale in dropped {
+        dismiss_side(&app, &stale);
     }
 
     if let Err(error) = ensure_side_window(&app, &label) {
@@ -596,44 +713,65 @@ pub fn show_side(text: &str, sender: &str, history_id: Option<u64>) -> bool {
         return false;
     }
 
-    if let Some(window) = app.get_webview_window(&label) {
-        let payload = {
-            let state = app.state::<SideState>();
-            let panel = state.inner.lock().expect("侧通知状态锁被 poison");
-            panel
-                .slots
-                .iter()
-                .find(|slot| slot.label == label)
-                .map(|slot| slot.payload.clone())
-        };
-        if let Some(payload) = payload {
-            // 必须定向 emit：emit 是广播，三条侧通知窗口都会收到同一条 payload，
-            // 而前端按 payload.id 递增判断「是不是新的」——晚到的新消息会把
-            // 已经在显示的那几条全改成同一条文字（用户报的就是这个）。
-            if let Err(error) = app.emit_to(label.as_str(), SIDE_EVENT, payload) {
-                eprintln!("把侧通知推给窗口失败：{error}");
-            }
+    let payload = {
+        let state = app.state::<SideState>();
+        let panel = state.inner.lock().expect("侧通知状态锁被 poison");
+        panel
+            .slots
+            .iter()
+            .find(|slot| slot.label == label)
+            .map(|slot| slot.payload.clone())
+    };
+    if let Some(payload) = payload {
+        // 必须定向 emit：emit 是广播，三条侧通知窗口都会收到同一条 payload，
+        // 而前端按 payload.id 递增判断「是不是新的」——晚到的新消息会把
+        // 已经在显示的那几条全改成同一条文字（用户报的就是这个）。
+        if let Err(error) = app.emit_to(label.as_str(), SIDE_EVENT, payload) {
+            eprintln!("把侧通知推给窗口失败：{error}");
         }
-        restack(&app);
-        // 不等 on_page_load：透明无边框窗口在页面画出第一帧之前本来就是全透明的，
-        // 提前显示不会闪白；而隐藏窗口上的 on_page_load 有可能永远不来。
-        slide_in(&window);
     }
+    restack(&app);
+    // 这里**不**显示窗口：等页面把内容高度量出来报回来（side_resize），那一份上报
+    // 才是「卡片画完了」，这时 set_size + show 出来的第一帧就是最终样子。
+    //
+    // 窗口直接摆在终点，滑入动画全部交给页面里的 CSS（SideNotification.vue）：
+    // 逐帧挪原生窗口（每 12ms 一次 set_position）在低配机上是一顿一顿的，而窗口
+    // 本身透明，摆在哪一帧用户都看不见；入场动画的起点本来就在窗口右沿之外（被裁掉），
+    // 所以晚显示这几十毫秒看不出差别。
 
-    schedule_dismiss(app, label, generation);
+    schedule_dismiss(app.clone(), label.clone(), generation, options.duration_ms);
+    schedule_fallback_show(app, label, generation);
     true
 }
 
 /// 配置页「预览侧通知」按钮：拿一条样品走一遍侧通知，不用真的收到私聊。
+///
+/// 配置页把输入框里的字号和时长一起带过来：预览的就是「保存后马上会生效」的样子，
+/// 不必先保存再看效果。
 #[tauri::command]
-pub async fn notice_preview_side() {
-    show_side(
+pub async fn notice_preview_side(
+    font: Option<u32>,
+    nick_font: Option<u32>,
+    secs: Option<u64>,
+) {
+    let defaults = SideOptions::load();
+    let options = SideOptions {
+        duration_ms: secs
+            .map_or(defaults.duration_ms, |s| {
+                crate::config::SideSettings::clamp_secs(s) * 1000
+            }),
+        font_px: font.map_or(defaults.font_px, crate::config::SideSettings::clamp_font),
+        nick_font_px: nick_font.map_or(defaults.nick_font_px, crate::config::SideSettings::clamp_font),
+        max: defaults.max,
+    };
+    show_side_configured(
         &format!(
             "这是一条侧通知预览：点右上角的 ✕，或者等 {} 秒它自己收起来。",
-            side_duration_ms() / 1000
+            options.duration_ms / 1000
         ),
         "预览 · 侧通知",
         None,
+        &options,
     );
 }
 
@@ -676,6 +814,9 @@ fn ensure_side_window(app: &AppHandle, label: &str) -> tauri::Result<()> {
 }
 
 /// 把整列侧通知贴着屏幕右上角从上往下排。
+///
+/// 位置是「滑过去」的：一条收起之后，下面的卡片带缓出地挪上来，不是瞬间跳到新位置。
+/// 尺寸没法插值（页面已经按新高度画好了），所以 set_size 立即生效，只有位置走动画。
 fn restack(app: &AppHandle) {
     // 先把要用的数字取出来：窗口操作会绕回来触发 side_resize，那也要抢这把锁。
     let slots: Vec<(String, u32)> = {
@@ -709,108 +850,165 @@ fn restack(app: &AppHandle) {
     let width = (SIDE_WIDTH * scale).round() as u32;
     let x = (origin.x as f64 + screen.width as f64 - SIDE_MARGIN * scale).round() - width as f64;
     let mut y = origin.y as f64 + SIDE_MARGIN * scale;
+    // 这一趟要滑的窗口：(label, 起点 x/y, 终点 x/y)，都是物理像素。
+    let mut moves: Vec<(String, i32, i32, i32, i32)> = Vec::new();
 
     for (label, height) in slots {
         if let Some(window) = app.get_webview_window(&label) {
-            if let Err(error) = window.set_size(PhysicalSize::new(width, height)) {
-                eprintln!("设置侧通知窗口尺寸失败：{error}");
+            // 尺寸/位置没变就别调 Win32：set_size 会让 WebView2 重新布局 + 重画，
+            // set_position 要重新合成。几条通知一起到的时候，「没变也调一遍」
+            // 就是主要的开销。
+            // height == 0：页面还没报高度，先按估算高度摆。
+            let height = if height == 0 {
+                (SIDE_FALLBACK_HEIGHT as f64 * scale).round() as u32
+            } else {
+                height
+            };
+            let size = PhysicalSize::new(width, height);
+            if window.inner_size().ok() != Some(size) {
+                if let Err(error) = window.set_size(size) {
+                    eprintln!("设置侧通知窗口尺寸失败：{error}");
+                }
             }
-            if let Err(error) = window
-                .set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32))
-            {
-                eprintln!("设置侧通知窗口位置失败：{error}");
+            let position = PhysicalPosition::new(x.round() as i32, y.round() as i32);
+            let current = window.outer_position().ok();
+            if current != Some(position) {
+                match current {
+                    // 已经在屏幕上显示的：滑过去（下面统一走动画）。
+                    Some(from) if window.is_visible().unwrap_or(false) => {
+                        moves.push((label, from.x, from.y, position.x, position.y));
+                    }
+                    // 还没显示出来的（这一轮刚建好、还没 show）直接摆到位：它本来就是隐藏的，
+                    // 让它从系统给的默认位置滑过来只会看到一张卡飞进来。
+                    _ => {
+                        if let Err(error) = window.set_position(position) {
+                            eprintln!("设置侧通知窗口位置失败：{error}");
+                        }
+                    }
+                }
             }
         }
         y += height as f64 + SIDE_GAP * scale;
     }
-}
 
-/// 滑入的步数和每步间隔：16 步 × 12ms，约 190ms 走完，和系统通知的手感差不多。
-/// 步数比早先多一点：之前匀速 12 步看着像被生硬地「推」进去。
-const SIDE_SLIDE_STEPS: u32 = 16;
-const SIDE_SLIDE_STEP_MS: u64 = 12;
-
-/// 把一条侧通知从屏幕右沿推进来，到位后就地显示（像系统通知那样滑出来）。
-///
-/// 动画动的是**窗口**的 x，不是页面里的元素：窗口矩形以外的东西会被裁掉，
-/// 卡片自己 translate 到窗口外面就什么都看不见了。收起仍然是直接隐藏，不做退场。
-fn slide_in(window: &tauri::WebviewWindow) {
-    // restack 已经把它摆到终点了，这里只需要读出来当落点。
-    let Ok(target) = window.outer_position() else {
-        let _ = window.show();
-        return;
-    };
-    let Some(start_x) = screen_right(window) else {
-        let _ = window.show();
-        return;
-    };
-    // 起点比终点还靠左说明这窗口不在右沿上（显示器换了、被用户拖过），别硬滑。
-    if start_x <= target.x {
-        let _ = window.show();
+    if moves.is_empty() {
         return;
     }
-
-    // 先挪到屏幕外再显示：倒过来会让人先看见它在终点闪一帧。
-    let _ = window.set_position(PhysicalPosition::new(start_x, target.y));
-    let _ = window.show();
-
-    let window = window.clone();
+    // 新的一次重排作废上一次没走完的动画。
+    let generation = RESTACK_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
     std::thread::spawn(move || {
-        let distance = target.x as f64 - start_x as f64;
-        for step in 1..=SIDE_SLIDE_STEPS {
-            // ease-out cubic：起步快、收尾慢，滑到位时不再「哐」一下停住。
-            let ratio = step as f64 / SIDE_SLIDE_STEPS as f64;
-            let eased = 1.0 - (1.0 - ratio).powi(3);
-            let x = start_x + (distance * eased).round() as i32;
-            // y 每步都重新读：滑动途中又有新通知进来，restack 改过的 y 不能被这里覆盖回去。
-            let Ok(now) = window.outer_position() else {
-                return;
-            };
-            if window
-                .set_position(PhysicalPosition::new(x, now.y))
-                .is_err()
-            {
+        for step in 1..=SIDE_MOVE_STEPS {
+            if RESTACK_GEN.load(Ordering::SeqCst) != generation {
                 return;
             }
-            if step < SIDE_SLIDE_STEPS {
-                std::thread::sleep(Duration::from_millis(SIDE_SLIDE_STEP_MS));
+            let t = step as f64 / SIDE_MOVE_STEPS as f64;
+            // 缓出：起步快、收尾慢，像是被推上去的。
+            let ease = 1.0 - (1.0 - t).powi(3);
+            for (label, from_x, from_y, to_x, to_y) in &moves {
+                if let Some(window) = app.get_webview_window(label) {
+                    let x = (*from_x as f64 + (*to_x - *from_x) as f64 * ease).round() as i32;
+                    let y = (*from_y as f64 + (*to_y - *from_y) as f64 * ease).round() as i32;
+                    let _ = window.set_position(PhysicalPosition::new(x, y));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(SIDE_MOVE_STEP_MS));
+        }
+    });
+}
+
+
+/// 收起一条侧通知：从栈里摘掉、让页面播完退场动画、再隐藏窗口。
+///
+/// 记账立刻做（下面的卡片马上开始往上补），只有 hide 推迟到退场动画之后：
+/// 直接 hide 的话卡片是「啪」地一下消失，看起来生硬。
+fn dismiss_side(app: &AppHandle, label: &str) {
+    let generation = {
+        let state = app.state::<SideState>();
+        let mut panel = state.inner.lock().expect("侧通知状态锁被 poison");
+        panel.slots.retain(|slot| slot.label != label);
+        // 代次 +1：还在睡的自动收起线程醒来会发现对不上，不会再动这条窗口。
+        let generation = panel.generations.entry(label.to_string()).or_insert(0);
+        *generation += 1;
+        *generation
+    };
+    // 发不出去也不影响：下面照样按时隐藏，只是少了退场动画。
+    if let Err(error) = app.emit_to(label, SIDE_EXIT_EVENT, ()) {
+        eprintln!("侧通知退场事件发不出去：{error}");
+    }
+    restack(app);
+    // 动画这段时间里这条窗口可能已经被下一条消息复用（代次变了），那就交给新消息显示，
+    // 这里不许再把它藏起来。
+    let app = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(SIDE_EXIT_MS));
+        let reused = {
+            let state = app.state::<SideState>();
+            let panel = state.inner.lock().expect("侧通知状态锁被 poison");
+            panel.generations.get(&label).copied().unwrap_or(0) != generation
+        };
+        if !reused {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.hide();
             }
         }
     });
 }
 
-/// 主显示器右沿的物理 x（窗口从这儿外滑进来）。
-fn screen_right(window: &tauri::WebviewWindow) -> Option<i32> {
-    let monitor = match window.primary_monitor() {
-        Ok(Some(monitor)) => monitor,
-        Ok(None) => return None,
-        Err(error) => {
-            eprintln!("查询显示器失败，侧通知直接出现不滑入：{error}");
-            return None;
-        }
+/// 配置页把「最多几条」改小之后，把多出来的那几张立刻收掉。
+///
+/// 只在收到下一条消息时才收敛的话，用户刚把 3 改成 1，屏幕上那两条还会一直挂到自动收起。
+pub fn apply_side_limit() {
+    let Some(app) = APP.get().cloned() else {
+        return;
     };
-    Some(monitor.position().x + monitor.size().width as i32)
-}
-
-/// 收起一条侧通知：从栈里摘掉、隐藏窗口，再把下面的补上来。
-fn dismiss_side(app: &AppHandle, label: &str) {
-    {
+    let max = SideOptions::load().max;
+    let stale: Vec<String> = {
         let state = app.state::<SideState>();
         let mut panel = state.inner.lock().expect("侧通知状态锁被 poison");
-        panel.slots.retain(|slot| slot.label != label);
-        // 代次 +1：还在睡的自动收起线程醒来会发现对不上，不会再动这条窗口。
-        *panel.generations.entry(label.to_string()).or_insert(0) += 1;
+        let mut stale = Vec::new();
+        // 收队首（最早那几条），留着最新的 —— 和 push 挤掉时的取舍一致。
+        while panel.slots.len() > max {
+            stale.push(panel.slots.remove(0).label);
+        }
+        stale
+    };
+    for label in stale {
+        dismiss_side(&app, &label);
     }
-    if let Some(window) = app.get_webview_window(label) {
-        let _ = window.hide();
-    }
-    restack(app);
+}
+
+/// 页面没在 SIDE_SHOW_DEADLINE_MS 内报高度就兜底显示出来（否则这条通知永远藏着）。
+fn schedule_fallback_show(app: AppHandle, label: String, generation: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(SIDE_SHOW_DEADLINE_MS));
+        let show = {
+            let state = app.state::<SideState>();
+            let mut panel = state.inner.lock().expect("侧通知状态锁被 poison");
+            // 代次对不上说明这条窗口已经被复用成下一条了；shown 已经是 true 说明页面
+            // 早在时限内报过高度了。
+            let same_generation = panel.generations.get(&label).copied().unwrap_or(0) == generation;
+            match panel.slots.iter_mut().find(|slot| slot.label == label) {
+                Some(slot) if same_generation && !slot.shown => {
+                    slot.shown = true;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if show {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.show();
+            }
+        }
+    });
 }
 
 /// 到点自动收起。只是让一个线程睡一觉，不值得为它引一个异步运行时。
-fn schedule_dismiss(app: AppHandle, label: String, generation: u64) {
+fn schedule_dismiss(app: AppHandle, label: String, generation: u64, duration_ms: u64) {
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(side_duration_ms()));
+        std::thread::sleep(Duration::from_millis(duration_ms));
         let still_showing = {
             let state = app.state::<SideState>();
             let panel = state.inner.lock().expect("侧通知状态锁被 poison");
@@ -822,3 +1020,133 @@ fn schedule_dismiss(app: AppHandle, label: String, generation: u64) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(panel: &SidePanel) -> Vec<&str> {
+        panel
+            .slots
+            .iter()
+            .map(|slot| slot.payload.notice.text.as_str())
+            .collect()
+    }
+
+    /// 默认池子 3 条（配置里的默认值）。
+    fn push(
+        panel: &mut SidePanel,
+        text: &str,
+        history_id: Option<u64>,
+    ) -> Option<(String, u64, Vec<String>)> {
+        push_max(panel, text, history_id, 3)
+    }
+
+    fn push_max(
+        panel: &mut SidePanel,
+        text: &str,
+        history_id: Option<u64>,
+        max: usize,
+    ) -> Option<(String, u64, Vec<String>)> {
+        panel.push(
+            text.to_string(),
+            "某人".to_string(),
+            history_id,
+            17,
+            15,
+            1000,
+            max,
+        )
+    }
+
+    /// 侧通知从上往下的顺序是「老的在上、新来的在下」，满三条时挤掉最早那条。
+    /// 这个顺序是刻意的：新消息插到队首会把已经在显示的卡整体往下推（见 push）。
+    #[test]
+    fn new_side_notice_joins_the_tail_and_evicts_the_oldest() {
+        let mut panel = SidePanel::default();
+        for (index, text) in ["一", "二", "三"].iter().enumerate() {
+            let (label, generation, _) =
+                push(&mut panel, text, Some(index as u64)).expect("前三条应该都进得去");
+            assert_eq!(label, side_label(index));
+            assert_eq!(generation, 1);
+        }
+        assert_eq!(texts(&panel), ["一", "二", "三"]);
+
+        // 最早那条已经量到高度、也就是正显示在屏幕上。
+        panel.slots[0].height = 208;
+        panel.slots[0].shown = true;
+
+        // 第四条：最早的「一」被挤掉，它那个窗口挪到队尾显示新内容。
+        let (label, generation, dropped) =
+            push(&mut panel, "四", Some(9)).expect("第四条应该挤掉最早那条");
+        assert_eq!(label, side_label(0));
+        assert!(dropped.is_empty(), "三条满时是原地复用，不用额外收谁");
+        assert_eq!(generation, 2);
+        assert_eq!(texts(&panel), ["二", "三", "四"]);
+        // 高度和「已经显示」的状态跟着窗口一起复用：原地换内容，不会藏一下再弹出来。
+        assert_eq!(panel.slots[2].height, 208);
+        assert!(panel.slots[2].shown);
+    }
+
+    /// 新卡片在页面报高度之前是「没量到、也没显示」的：窗口要等 side_resize 才显示，
+    /// 免得先按估算高度画出来、过一会儿再长高一次（看着就是卡片被裁一刀又弹开）。
+    #[test]
+    fn new_side_notice_waits_for_measured_height_before_showing() {
+        let mut panel = SidePanel::default();
+        push(&mut panel, "一", None).expect("第一条应该进得去");
+        assert_eq!(panel.slots[0].height, 0);
+        assert!(!panel.slots[0].shown);
+    }
+
+    /// 同一条聊天记录已经挂在右上角时不再弹第二张卡。
+    #[test]
+    fn same_history_entry_is_not_shown_twice() {
+        let mut panel = SidePanel::default();
+        assert!(push(&mut panel, "一", Some(7)).is_some());
+        assert!(push(&mut panel, "又来", Some(7)).is_none());
+    }
+
+    /// 「最多展示几条」= 1 时：每条新消息都用同一个窗口原地换，不是叠上去。
+    #[test]
+    fn single_slot_reuses_the_only_window() {
+        let mut panel = SidePanel::default();
+        let (label, _, dropped) = push_max(&mut panel, "一", Some(1), 1).expect("第一条应该进得去");
+        assert_eq!(label, side_label(0));
+        assert!(dropped.is_empty());
+
+        panel.slots[0].height = 208;
+        panel.slots[0].shown = true;
+
+        let (label, generation, dropped) =
+            push_max(&mut panel, "二", Some(2), 1).expect("第二条应该换掉第一条");
+        assert_eq!(label, side_label(0));
+        assert_eq!(generation, 2);
+        assert_eq!(texts(&panel), ["二"]);
+        assert!(dropped.is_empty(), "只有一条时是原地换内容，不是额外收掉");
+        assert_eq!(panel.slots[0].height, 208);
+        assert!(panel.slots[0].shown);
+    }
+
+    /// 上限从 3 改成 2 之后再来一条：多出来的旧卡收掉，屏幕上只留最新的两条。
+    #[test]
+    fn lowering_the_limit_retires_the_oldest_cards() {
+        let mut panel = SidePanel::default();
+        for (index, text) in ["一", "二", "三"].iter().enumerate() {
+            push_max(&mut panel, text, Some(index as u64), 3).expect("三条都该进得去");
+        }
+
+        let (_, _, dropped) = push_max(&mut panel, "四", Some(9), 2).expect("第四条应该进得去");
+        assert_eq!(texts(&panel), ["三", "四"]);
+        // 被收掉的是第二条（最早的「一」那个窗口被复用成「四」了）。
+        assert_eq!(dropped, vec![side_label(1)]);
+    }
+
+    /// 没有聊天记录编号（配置页预览就是这种）时不去重，点几次看几次。
+    #[test]
+    fn previews_without_history_id_always_show() {
+        let mut panel = SidePanel::default();
+        assert!(push(&mut panel, "预览一", None).is_some());
+        assert!(push(&mut panel, "预览二", None).is_some());
+    }
+}
+

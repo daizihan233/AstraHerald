@@ -8,7 +8,7 @@
 //! 三条纪律：
 //! 1. 端口已经有人在听时绝不重复拉起（用户自己起的那份就是我们要连的那份）；
 //! 2. 任何带 dialoguer 交互的 load_local_conf 都不能在缺文件时被调到——GUI 的 stdin 是死的；
-//! 3. 只读框架的配置，唯一会写的是 runtime.json 里的 hookAutoLoad（见 ensure_hook_autoload）。
+//! 3. 只读框架的配置，一个字都不写；它要的开关（Hook、协议同意）由启动框架的人在环境变量里声明。
 
 use crate::config::{Config, OnebotSettings};
 use kovi_onebot::{Host, OneBotDriverConfig, Server};
@@ -20,6 +20,7 @@ use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// 本项目拉起来的框架子进程。退出时收掉，别留个孤儿进程占着端口。
@@ -186,33 +187,80 @@ fn server_from_json(server: &Value) -> Endpoint {
     Endpoint { host, port, path, access_token }
 }
 
-/// SnowLuma 自动生成的 runtime.json 里 hookAutoLoad 是 false（启动后不 Hook QQ，什么都收不到）。
-/// 只在文件里有这个字段时改它一个字段，其余原样写回；返回是否真的改了磁盘上的文件。
-pub fn ensure_hook_autoload(dir: &Path) -> bool {
+/// 框架自己的布尔环境变量写法（index.mjs 的 resolveAutoLoad 认这六种）。
+fn parse_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// 框架 runtime.json 里的 hookAutoLoad；文件不在或读不出来就是 None。
+fn hook_autoload_in(dir: &Path) -> Option<bool> {
+    let text = fs::read_to_string(dir.join("config").join("runtime.json")).ok()?;
+    let value = serde_json::from_str::<Value>(&text).ok()?;
+    value.get("hookAutoLoad").and_then(|value| value.as_bool())
+}
+
+/// 把框架的 hookAutoLoad 打开：只改这一个键，同一个文件里别的键一个字节都不碰。
+///
+/// 框架默认关着它时不注入 Hook，一条消息都收不到；而用户手填的启动文件
+/// （launcher.bat / exe）不像 deploy.bat 那样带着 SNOWLUMA_HOOK_AUTOLOAD=1。
+/// 这里等价于用户在框架自己的 WebUI 里点一下那个开关：不代用户声明同意框架的协议
+/// （EULA / PRIVACY 那些环境变量一个都不设），也不动别的任何设置。
+/// 读不出来（框架还没写出 runtime.json，或压根没 Hook 这概念，如 NapCat / Lagrange）
+/// 就闭嘴走人——所以 ensure_running 在等它起来之后再叫一次。
+fn ensure_hook_autoload(dir: &Path) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    match std::env::var("SNOWLUMA_HOOK_AUTOLOAD")
+        .ok()
+        .and_then(|raw| parse_flag(&raw))
+    {
+        // 启动环境里已经开着了；明确关着那是用户自己的决定，改文件也没用（环境变量优先）。
+        Some(true) => return,
+        Some(false) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("框架被环境变量 SNOWLUMA_HOOK_AUTOLOAD=0 关着 Hook，不动它的配置");
+            }
+            return;
+        }
+        None => {}
+    }
+
     let path = dir.join("config").join("runtime.json");
+    let Some(current) = hook_autoload_in(dir) else {
+        return;
+    };
+    if current {
+        return;
+    }
     let Ok(text) = fs::read_to_string(&path) else {
-        eprintln!("读不到 {}，跳过 hookAutoLoad 修正", path.display());
-        return false;
+        return;
     };
     let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
-        eprintln!("{} 不是合法 JSON，跳过 hookAutoLoad 修正", path.display());
-        return false;
+        // 人家写的东西解析不了就别碰，宁可收不到消息也不能把配置写坏。
+        eprintln!("{} 不是能解析的 JSON，不去改它", path.display());
+        return;
     };
-    if value.get("hookAutoLoad").and_then(|value| value.as_bool()) == Some(true) {
-        return false;
-    }
-    value["hookAutoLoad"] = Value::Bool(true);
-    let Ok(json) = serde_json::to_string_pretty(&value) else {
-        return false;
+    let Some(object) = value.as_object_mut() else {
+        return;
     };
-    match fs::write(&path, json) {
-        Ok(()) => {
-            eprintln!("已把 Hook 自动加载设为 true：{}", path.display());
-            true
-        }
+    object.insert("hookAutoLoad".to_string(), Value::Bool(true));
+    let written = format!("{}\n", serde_json::to_string_pretty(&value).unwrap_or_default());
+    match fs::write(&path, written) {
+        Ok(()) => eprintln!(
+            "已把 {} 的 hookAutoLoad 打开（只改这一个键；正在跑的那份要重启才生效）",
+            path.display()
+        ),
         Err(e) => {
-            eprintln!("写 {} 失败：{e}", path.display());
-            false
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "想把 {} 的 hookAutoLoad 打开但写不进去：{e}；\
+                     框架不注入 Hook 就收不到消息，去它自己的 WebUI 里打开",
+                    path.display()
+                );
+            }
         }
     }
 }
@@ -349,14 +397,11 @@ pub fn ensure_running(config: &Config) -> bool {
     let (program, args) = launcher(&startup);
     let mut cmd = Command::new(&program);
     cmd.args(&args)
-        // SnowLuma 给无人值守部署留的口子（它自己的 EULA_ACCEPT_ENV / PRIVACY_ACCEPT_ENV）：
-        // 设了就不弹「先同意条款」，也不写 consent.json。别的框架忽略这两个变量。
-        .env("SNOWLUMA_ACCEPT_EULA", "1")
-        .env("SNOWLUMA_ACCEPT_PRIVACY", "1")
-        // 自动注入 Hook 的开关：这个变量优先级高于 runtime.json（官方文档），
-        // 所以我们拉起的这一份即使 runtime.json 是自动生成的 false 也一定能收到消息。
-        // 仍然要顺手修 runtime.json（ensure_hook_autoload）——用户自己起框架时注入不了环境变量。
-        .env("SNOWLUMA_HOOK_AUTOLOAD", "1")
+        // 一个环境变量都不设：代用户声明「已接受框架的协议」、或替框架决定 Hook 开关，
+        // 是启动框架的人自己的事（SnowLuma 的 SNOWLUMA_ACCEPT_EULA / _PRIVACY / _HOOK_AUTOLOAD
+        // 就是这个语义，它的 EULA 5.4 把「自动化脚本部署」列为须经书面授权的行为）。
+        // 要无人值守就在启动框架前设好——deploy.bat 是在运行脚本的人这一侧设的；
+        // 本应用只继承环境，不制造同意。
         .current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -374,6 +419,8 @@ pub fn ensure_running(config: &Config) -> bool {
                 *guard = Some(child);
             }
             wait_ready(&dir, &probe.host, probe.port);
+            // 框架这会儿才写出 runtime.json：再看一次，它默认关着 Hook 的情况才改得到。
+            ensure_hook_autoload(&dir);
             true
         }
         Err(e) => {
@@ -686,23 +733,52 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 原版 runtime.json 是 hookAutoLoad=false——必须被改成 true，且别的字段不能丢。
+    /// Hook 开关：关着就打开，且只改这一个键；读不到 / 解析不了的一律不碰。
     #[test]
-    fn hook_autoload_is_forced_true_without_losing_fields() {
+    fn hook_autoload_flip_touches_only_that_field() {
+        assert_eq!(parse_flag("1"), Some(true));
+        assert_eq!(parse_flag(" TRUE "), Some(true));
+        assert_eq!(parse_flag("on"), Some(true));
+        assert_eq!(parse_flag("0"), Some(false));
+        assert_eq!(parse_flag("off"), Some(false));
+        assert_eq!(parse_flag(""), None);
+        assert_eq!(parse_flag("maybe"), None);
+
         let dir = tmpdir("runtime");
         let path = dir.join("config").join("runtime.json");
-        fs::write(&path, r#"{"webuiPort":5099,"hookAutoLoad":false,"webuiHost":"127.0.0.1"}"#).unwrap();
-        assert!(ensure_hook_autoload(&dir));
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value.get("hookAutoLoad").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(value.get("webuiPort").and_then(|v| v.as_u64()), Some(5099));
-        // 没有这个文件的框架：什么都不做，也不能报错。
+        fs::write(
+            &path,
+            r#"{"webuiPort":5099,"hookAutoLoad":false,"webuiHost":"127.0.0.1"}"#,
+        )
+        .unwrap();
+        assert_eq!(hook_autoload_in(&dir), Some(false));
+        ensure_hook_autoload(&dir);
+        let fixed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(fixed["hookAutoLoad"], Value::Bool(true));
+        assert_eq!(fixed["webuiPort"], Value::from(5099), "同一个文件里别的键不能变");
+        assert_eq!(fixed["webuiHost"], Value::from("127.0.0.1"));
+
+        // 已经是 true：文件一个字节都不该再变。
+        let already = fs::read_to_string(&path).unwrap();
+        ensure_hook_autoload(&dir);
+        assert_eq!(fs::read_to_string(&path).unwrap(), already);
+
+        // 框架还没写出 runtime.json（或压根没 Hook 这概念）：不能凭空造一个出来。
         let other = tmpdir("runtime-none");
-        assert!(!ensure_hook_autoload(&other));
-        // 第二次调用不该再写（已经是 true）。
-        assert!(!ensure_hook_autoload(&dir));
+        assert_eq!(hook_autoload_in(&other), None);
+        ensure_hook_autoload(&other);
+        assert!(!other.join("config").join("runtime.json").exists());
+
+        // 解析不了：原样留着，宁可收不到消息也不能把用户的配置写坏。
+        let broken = tmpdir("runtime-broken");
+        let broken_path = broken.join("config").join("runtime.json");
+        fs::write(&broken_path, "{ not json").unwrap();
+        ensure_hook_autoload(&broken);
+        assert_eq!(fs::read_to_string(&broken_path).unwrap(), "{ not json");
+
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&other);
+        let _ = fs::remove_dir_all(&broken);
     }
 
     /// 启动文件认三种形态：脚本找 node、批处理交给 cmd、可执行文件直接跑。

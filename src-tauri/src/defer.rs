@@ -111,6 +111,8 @@ fn announce(item: Pending, action: SceneAction) {
     // 两条路径都返回「发出去没有」，这里不看：发不出去（窗口还没起来）时已经各自打了日志。
     let _ = match action {
         SceneAction::Side => notice::show_side(&item.text, &item.sender, item.history_id),
+        // 上课时延后、下课时发现那一格改成了「忽略」：这条就不弹了（聊天记录里还在）。
+        SceneAction::Ignore => false,
         _ => notice::show(
             &item.text,
             &item.sender,

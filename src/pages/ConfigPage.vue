@@ -14,6 +14,7 @@ import { autoFillRoles, friendOptions, loadConfig, saveConfig } from "../api.js"
 import {
   DEFAULT_AUTOSTART,
   DEFAULT_PERIOD,
+  ONEBOT_WEBUI_DEFAULT,
   ROLE_OPTIONS,
   defaultFilePolicy,
   defaultOnebot,
@@ -103,13 +104,24 @@ function toConfig() {
       port: onebot.value.port.trim(),
       path: onebot.value.path.trim(),
       access_token: onebot.value.access_token.trim(),
+      // 空串后端会兜底，但落盘就写清楚，免得配置文件里看着像没配。
+      webui_url: onebot.value.webui_url.trim() || ONEBOT_WEBUI_DEFAULT,
     },
     files: filePolicy.value,
-    // 时长给后端一个能用的整数：输入框清空时是 null，后端那边会 clamp 到 3..300。
+    // 时长和字号都给后端一个能用的整数：输入框清空时是 null，后端那边会
+    // clamp 到 3..300 秒、12..40 像素。
     side: {
       duration_secs:
         Number.isFinite(Number(side.value.duration_secs)) && Number(side.value.duration_secs) > 0
           ? Math.round(Number(side.value.duration_secs))
+          : 15,
+      font_size_px:
+        Number.isFinite(Number(side.value.font_size_px)) && Number(side.value.font_size_px) > 0
+          ? Math.round(Number(side.value.font_size_px))
+          : 17,
+      nick_font_px:
+        Number.isFinite(Number(side.value.nick_font_px)) && Number(side.value.nick_font_px) > 0
+          ? Math.round(Number(side.value.nick_font_px))
           : 15,
     },
     updater: {
@@ -172,6 +184,12 @@ function validate() {
   const port = onebot.value.port.trim();
   if (port && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) {
     return `OneBot 端口要填 1..65535 的数字（留空就从框架配置里读）：${port}`;
+  }
+
+  // 「连接配置」要打开的地址：托盘菜单点开就是个网页窗口，填坏了那个窗口打不开。
+  const webui = onebot.value.webui_url.trim() || ONEBOT_WEBUI_DEFAULT;
+  if (!/^https?:\/\//.test(webui)) {
+    return `连接服务网页端地址要以 http:// 或 https:// 开头：${webui}`;
   }
 
   const seenQq = [];

@@ -24,6 +24,8 @@ export const SCENE_ACTIONS = [
   { key: "strong", label: "强提醒" },
   { key: "side", label: "侧通知" },
   { key: "postpone", label: "延后至下课" },
+  // 只记进聊天记录，不弹任何提醒：全屏看片、投屏开会的时候用这一格。
+  { key: "ignore", label: "忽略" },
 ];
 
 /// 「默认状态」配置项的选项。就是场景矩阵的两列，复用同一份键名定义。
@@ -39,14 +41,20 @@ export const DEFAULT_PERIOD = "in_class";
 /// 这是个要一直挂着的消息托管程序，开机不拉起来等于没装。
 export const DEFAULT_AUTOSTART = true;
 
-/// 连接配置默认值，必须和 config.rs 的 Default for OnebotSettings 一致（全是空串）。
-/// startup 空 = 不托管任何框架；其余四项空 = 每次启动都从框架自己的配置里读。
+/// 托盘「连接配置」默认打开的地址（框架自己的网页端），必须和 config.rs 的
+/// DEFAULT_WEBUI_URL 一致。后端把这个字段空串也当默认值，所以这里填不填都对。
+export const ONEBOT_WEBUI_DEFAULT = "http://127.0.0.1:5099";
+
+/// 连接配置默认值，必须和 config.rs 的 Default for OnebotSettings 一致（连接四项全是空串）。
+/// startup 空 = 不托管任何框架；四项空 = 每次启动都从框架自己的配置里读；
+/// webui_url 只有「打开哪个网页端」这一个用途，空串后端会兜底成默认值。
 export const ONEBOT_DEFAULT = {
   startup: "",
   host: "",
   port: "",
   path: "",
   access_token: "",
+  webui_url: ONEBOT_WEBUI_DEFAULT,
 };
 
 /// 默认连接配置的副本——调用方会就地改它，不能把常量本身漏出去。
@@ -54,9 +62,11 @@ export function defaultOnebot() {
   return { ...ONEBOT_DEFAULT };
 }
 
-/// 侧通知默认显示时长（秒），必须和 config.rs 的 Default for SideSettings 一致。
-/// 后端会 clamp 到 3..300，界面上的数字输入框用同一区间。
-export const SIDE_DEFAULT = { duration_secs: 15 };
+/// 侧通知默认设置，必须和 config.rs 的 Default for SideSettings 一致：
+/// 显示 15 秒、正文 17 像素、昵称 15 像素、最多同时挂 3 条。后端会 clamp 到
+/// 3..300 秒、12..40 像素、1..10 条，界面上几个数字输入框用同一区间。
+/// 昵称和正文分开调，昵称默认比正文小一号。
+export const SIDE_DEFAULT = { duration_secs: 15, font_size_px: 17, nick_font_px: 15, max_count: 3 };
 
 /// 默认侧通知设置的副本——调用方会就地改它，不能把常量本身漏出去。
 export function defaultSide() {
@@ -100,10 +110,10 @@ export function sceneActionsFor(period) {
 }
 
 /// 产品定的默认场景，必须和 config.rs 的 Default for SceneSettings 一致：
-/// 上课时只有全屏延后至下课、其余侧通知；下课时全屏侧通知、其余强提醒。
+/// 上课时全屏忽略（只记聊天记录，不弹）、其余侧通知；下课时全屏侧通知、其余强提醒。
 export const DEFAULT_SCENE = {
   in_class: {
-    fullscreen: "postpone",
+    fullscreen: "ignore",
     maximized: "side",
     unfocused: "side",
     desktop: "side",
@@ -178,6 +188,9 @@ export function normalizeConfig(raw) {
       port: raw?.onebot?.port === undefined || raw?.onebot?.port === null ? "" : String(raw.onebot.port),
       path: String(raw?.onebot?.path ?? ""),
       access_token: String(raw?.onebot?.access_token ?? ""),
+      // 托盘「连接配置」打开的地址；留空 = 默认（后端也一样兜底）。空串归一成默认值，
+      // 免得输入框一片空白让人以为没配置。
+      webui_url: String(raw?.onebot?.webui_url ?? "") || ONEBOT_WEBUI_DEFAULT,
     },
     files: {
       open: normalizeExtList(raw?.files?.open, FILE_POLICY_DEFAULT.open),
@@ -188,6 +201,18 @@ export function normalizeConfig(raw) {
       duration_secs: Number.isFinite(Number(raw?.side?.duration_secs))
         ? Number(raw.side.duration_secs)
         : SIDE_DEFAULT.duration_secs,
+      // 字号同理：读不到（老配置）就 17，读到也先夹到 12..40（后端还会再夹一次）。
+      font_size_px: Number.isFinite(Number(raw?.side?.font_size_px))
+        ? Math.min(Math.max(Math.round(Number(raw.side.font_size_px)), 12), 40)
+        : SIDE_DEFAULT.font_size_px,
+      // 昵称字号同理：老配置里没有这一项就 15（以前是正文的 0.88 倍）。
+      nick_font_px: Number.isFinite(Number(raw?.side?.nick_font_px))
+        ? Math.min(Math.max(Math.round(Number(raw.side.nick_font_px)), 12), 40)
+        : SIDE_DEFAULT.nick_font_px,
+      // 最多同时展示几条：老配置里没有这一项就 3，读到也先夹到 1..10（后端还会再夹一次）。
+      max_count: Number.isFinite(Number(raw?.side?.max_count))
+        ? Math.min(Math.max(Math.round(Number(raw.side.max_count)), 1), 10)
+        : SIDE_DEFAULT.max_count,
     },
     updater: {
       enabled:
