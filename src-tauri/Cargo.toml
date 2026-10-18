@@ -1,0 +1,60 @@
+[package]
+name = "astra-herald"
+version = "0.1.0"
+description = "QQ 消息托管 · 私聊分级提醒 · 课表联动"
+authors = ["AstraHerald"]
+edition = "2024"
+# 本包有两个 bin：astra-herald（GUI）和 bot-only（只跑 bot 的调试入口）。
+# 不加这个键，不带 --bin 的 `cargo run` 会报
+# "could not determine which binary to run" —— `bun run tauri dev` 内部正是这样调的。
+default-run = "astra-herald"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "astra_herald_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon：任务栏图标 + 左键展开菜单（见 lib.rs 的 build_tray）。
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+kovi.workspace = true
+kovi-onebot.workspace = true
+kovi-plugin-cmd = { version = "0.4.0", features = ["onebot"] }
+
+log = "0.4.34"
+
+owl-logger = "0.3.1"
+tauri-plugin-dialog = "2.8.3"
+
+# 这个包自己当 workspace 根：kovi / kovi-onebot 通过 workspace.dependencies 统一版本。
+# Tauri 模板默认没有 workspace 根，`kovi.workspace = true` 会直接报
+# "error inheriting `kovi` from workspace root manifest's `workspace.dependencies.kovi`"。
+[workspace]
+
+[workspace.dependencies]
+kovi = "0.13.5"
+kovi-onebot = "0.13.2"
+
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+# 不用 panic = "abort"：这是常驻的提醒程序，kovi 在 OneBot 连不上时会在自己的任务里
+# panic（kovi-0.13.5 的 bot/run/connect.rs:114 "channel closed"），abort 会让整个 app 直接退出、
+# 外层重连循环形同虚设；unwind 只让那个任务自己死掉，循环接着重试。
+panic = "unwind"
+strip = true

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AstraHerald",
+  "mainBinaryName": "AstraHerald",
+  "version": "0.1.0",
+  "identifier": "cn.getastra.herald",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AstraHerald",
+        "width": 960,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 520,
+        "visible": false,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "AstraHerald",
+    "shortDescription": "QQ 消息托管与课表联动提醒",
+    "longDescription": "把 QQ 私聊按课表状态与前台窗口状态分级提醒：强提醒窗、右侧侧通知、延后至下课；支持快速回复候选、白名单/黑名单、好友身份匹配与文件消息自动下载。",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "template": "nsis/installer.nsi"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

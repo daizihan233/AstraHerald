@@ -1,0 +1,38 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+
+# kovi 生成的本地配置：运行时产物，别提交
+src-tauri/kovi.conf.toml
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 临时脚本与日志（调试用，不进版本库）
+.tmp-*
+
+# 运行时数据（config.json 里有 QQ 号与本机路径，不进版本库）
+src-tauri/config.json
+src-tauri/config.json.bak
+src-tauri/history.jsonl
+src-tauri/logs/
+src-tauri/kovi.plugin.toml

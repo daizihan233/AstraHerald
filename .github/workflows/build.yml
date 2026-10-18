@@ -1,0 +1,202 @@
+# 每次向 main 推送都会发一版：算滚动版本号 -> 打 NSIS 安装包 -> 发 GitHub Release -> 上传 OSS。
+# 版本号格式 YYYYMM.D.N（例 202510.2.40 = 2025-10-02 的第 40 次构建），N 用 workflow run number。
+# 参考同组织的 AstraSchedule/desktop 的 build.yml，只是 Tauri 只有 x64 单通道、
+# 元数据不是 latest.yml/win10.yml（自动更新还没接，见文件末尾的 ponytail 备注）。
+name: Rolling Build & Publish
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  # 版本号只在这里算一次，经 job output 提供给后面的任务共用。
+  # 若各任务各自 Get-Date：跨午夜/月末或失败重跑时两次算出的日期不同，会发布成两个 release。
+  version:
+    if: ${{ !startsWith(github.event.head_commit.message, 'docs') }}
+    runs-on: ubuntu-latest
+    outputs:
+      ver: ${{ steps.compute.outputs.ver }}
+    steps:
+      - id: compute
+        name: Compute rolling version
+        run: |
+          # 语义化版本：YYYYMM.D.N（均为数字且无前导零）
+          ym=$(date -u +%Y%m)
+          dd=$(date -u +%-d)
+          echo "ver=${ym}.$dd.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  build_and_publish:
+    name: Build & Publish
+    needs: version
+    if: ${{ !startsWith(github.event.head_commit.message, 'docs') }}
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.OSS_SECRET_KEY }}
+      AWS_DEFAULT_REGION: cn-east-1
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      ENDPOINT: https://cn-nb1.rains3.com
+      BUCKET: yanmo-objects
+      PREFIX: AstraHerald/
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 'latest'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Write version into package.json / tauri.conf.json / Cargo.toml
+        shell: pwsh
+        run: |
+          $ver = '${{ needs.version.outputs.ver }}'
+
+          $pkgPath = 'package.json'
+          $pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json
+          $pkg.version = $ver
+          $pkg | ConvertTo-Json -Depth 100 | Out-File -Encoding UTF8 $pkgPath
+
+          # 安装包文件名与注册表里的版本都读这里，必须一起改
+          $confPath = 'src-tauri/tauri.conf.json'
+          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+          $conf.version = $ver
+          $conf | ConvertTo-Json -Depth 100 | Out-File -Encoding UTF8 $confPath
+
+          $cargoPath = 'src-tauri/Cargo.toml'
+          $cargo = Get-Content $cargoPath -Raw
+          $cargo = $cargo -replace '(?m)^version\s*=\s*"[0-9][^"]*"', "version = `"$ver`""
+          $cargo | Out-File -Encoding UTF8 $cargoPath
+
+          Write-Host "Version: $ver"
+
+
+      - name: Build NSIS installer
+        run: bun x tauri build --bundles nsis
+
+      - name: Collect installer and stable alias
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -File -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { Write-Error '没有找到 NSIS 安装包'; exit 1 }
+          New-Item -ItemType Directory -Path 'dist-release' -Force | Out-Null
+          Copy-Item $installer.FullName 'dist-release/'
+          # 固定名字的别名：官网/注册中心的永久下载链接用这个，内容每次覆盖
+          Copy-Item $installer.FullName 'dist-release/AstraHeraldInstaller.exe'
+          Write-Host "$($installer.Name)  $([math]::Round($installer.Length / 1MB, 2)) MB"
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = '${{ needs.version.outputs.ver }}'
+          $tag = "v$ver"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --generate-notes --target $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          gh release upload $tag (Get-ChildItem 'dist-release' -File).FullName --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Release $tag 已更新"
+
+      - name: Upload to OSS
+        shell: pwsh
+        run: |
+          $ver = '${{ needs.version.outputs.ver }}'
+          function Push-OSS([string]$local, [string]$key) {
+            Write-Host "Uploading $key"
+            aws s3 cp $local "s3://$env:BUCKET/$key" --endpoint-url "$env:ENDPOINT"
+            if ($LASTEXITCODE -ne 0) { Write-Error "上传 $key 失败"; exit $LASTEXITCODE }
+          }
+          # 按版本归档 + latest 稳定目录（客户端自动更新以后读 latest/）
+          foreach ($file in Get-ChildItem 'dist-release' -File) {
+            Push-OSS $file.FullName "${env:PREFIX}$ver/$($file.Name)"
+            Push-OSS $file.FullName "${env:PREFIX}latest/$($file.Name)"
+          }
+          Write-Host "OSS 上传完成：${env:PREFIX}$ver/ 与 ${env:PREFIX}latest/"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-release
+          path: dist-release/**
+          if-no-files-found: error
+
+  # latest/ 里必须只留当前版本的产物：残留的旧安装包会让客户端下到过期文件。
+  # 先校验 latest/ 上的安装包和本地打出来的完全等大，再删多余的 .exe。
+  prune_oss_latest:
+    name: Verify & prune OSS latest/
+    needs: [version, build_and_publish]
+    if: ${{ !startsWith(github.event.head_commit.message, 'docs') }}
+    runs-on: windows-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.OSS_SECRET_KEY }}
+      AWS_DEFAULT_REGION: cn-east-1
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      ENDPOINT: https://cn-nb1.rains3.com
+      BUCKET: yanmo-objects
+      PREFIX: AstraHerald/latest/
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download the artifact we just built
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-release
+          path: dist-release
+
+      - name: Verify latest/ matches this build
+        shell: pwsh
+        run: |
+          foreach ($file in Get-ChildItem 'dist-release' -File) {
+            $key = "$env:PREFIX$($file.Name)"
+            $remote = aws s3api head-object --bucket $env:BUCKET --key $key --endpoint-url $env:ENDPOINT --query 'ContentLength' --output text
+            if ($LASTEXITCODE -ne 0) { Write-Error "读不到 $key"; exit $LASTEXITCODE }
+            if ([long]$remote -ne [long]$file.Length) {
+              Write-Error "::error::$key 远端大小 $remote 与本次构建 $($file.Length) 不一致"
+              exit 1
+            }
+            Write-Host "OK: $($file.Name) -> $remote bytes"
+          }
+
+      - name: Delete objects that are not part of this version
+        shell: pwsh
+        run: |
+          $ver = '${{ needs.version.outputs.ver }}'
+          $prefix = $env:PREFIX
+          $keep = @("${prefix}AstraHerald_${ver}_x64-setup.exe", "${prefix}AstraHeraldInstaller.exe")
+          $listed = aws s3api list-objects-v2 --bucket $env:BUCKET --prefix $prefix --endpoint-url $env:ENDPOINT --query 'Contents[].Key' --output text
+          if ($LASTEXITCODE -ne 0) { Write-Error '列出 latest/ 对象失败'; exit $LASTEXITCODE }
+          $keys = @($listed -split '\s+') | Where-Object { $_ -and $_ -ne 'None' }
+          Write-Host "Current version: $ver"
+          foreach ($key in $keys) {
+            if ($key -notmatch '\.exe$') { Write-Host "keep (not a release artifact): $key"; continue }
+            if ($keep -contains $key) { Write-Host "keep: $key"; continue }
+            Write-Host "delete: $key"
+            aws s3 rm "s3://$env:BUCKET/$key" --endpoint-url $env:ENDPOINT
+            if ($LASTEXITCODE -ne 0) { Write-Error "删除 $key 失败"; exit $LASTEXITCODE }
+          }
+          Write-Host "OSS $env:PREFIX 现在只保留 $ver 的产物"
+
+# ponytail: 自动更新（tauri-plugin-updater + latest.json + 签名）还没接，
+# 所以这里只发安装包；接的时候在 build 步骤加 TAURI_SIGNING_PRIVATE_KEY、
+# 打开 tauri.conf.json 的 bundle.createUpdaterArtifacts，再把 latest.json/.sig 一起传 OSS。
