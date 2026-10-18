@@ -16,27 +16,42 @@ pub const FALLBACK_ROLE: &str = "课程";
 
 /// 备注名里出现课程名，就算这位老师教这门课。
 ///
-/// 同时撞上多门时取名字最长的那门：「高等数学」和「数学」都在备注里时，
-/// 长的那个更具体。课程的全名和简称都试。
+/// 同时撞上多门时，比的是**撞上的那个名字**有多长，不是课程全名有多长：
+/// 课表里「课」→「课后辅导」这种单字简称要是按全名长度比，就会在「物理课代表」
+/// 里压过「物理」（4 > 2）。同长时优先全名命中。
 pub fn match_role(name: &str, subjects: &[(String, String)]) -> String {
-    let mut best: Option<&(String, String)> = None;
+    // (命中的课程, 命中名字的长度, 命中的是不是全名)
+    let mut best: Option<(&(String, String), usize, bool)> = None;
     for subject in subjects {
-        let hit = [subject.0.as_str(), subject.1.as_str()]
-            .iter()
-            .any(|candidate| !candidate.is_empty() && name.contains(candidate));
-        if !hit {
-            continue;
+        let mut hit: Option<(usize, bool)> = None;
+        for (needle, is_full) in [(subject.0.as_str(), false), (subject.1.as_str(), true)] {
+            if needle.is_empty() || !name.contains(needle) {
+                continue;
+            }
+            let score = needle.chars().count();
+            let better = match hit {
+                None => true,
+                Some((len, was_full)) => score > len || (score == len && is_full && !was_full),
+            };
+            if better {
+                hit = Some((score, is_full));
+            }
         }
-        let longer = best.is_none_or(|current| subject.1.chars().count() > current.1.chars().count());
-        if longer {
-            best = Some(subject);
+        if let Some((score, is_full)) = hit {
+            let better = match best {
+                None => true,
+                Some((_, len, was_full)) => score > len || (score == len && is_full && !was_full),
+            };
+            if better {
+                best = Some((subject, score, is_full));
+            }
         }
     }
 
     match best {
         // 身份存全名；课程只有简称时用简称，总比留空强。
-        Some((short, full)) if !full.is_empty() => full.clone(),
-        Some((short, _)) => short.clone(),
+        Some(((_, full), _, _)) if !full.is_empty() => full.clone(),
+        Some(((short, _), _, _)) => short.clone(),
         None => FALLBACK_ROLE.to_string(),
     }
 }
@@ -166,8 +181,20 @@ mod tests {
         assert_eq!(match_role("化学老师", &only_short), "化");
     }
 
+    /// 真实课表里「课」= 课后辅导，单字简称不能压过更具体的那门课。
     #[test]
-    fn roles_for_covers_every_friend() {
+    fn real_catalog_single_char_short_name_does_not_steal_the_match() {
+        let real = vec![
+            ("课".to_string(), "课后辅导".to_string()),
+            ("物".to_string(), "物理".to_string()),
+            ("考物".to_string(), "物理考试".to_string()),
+        ];
+        assert_eq!(match_role("物理课代表", &real), "物理");
+        assert_eq!(match_role("课后辅导群", &real), "课后辅导");
+        assert_eq!(match_role("物理考试出题人", &real), "物理考试");
+    }
+
+    #[test]    fn roles_for_covers_every_friend() {
         let friends = vec![
             Friend {
                 qq: 2,
