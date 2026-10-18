@@ -40,7 +40,7 @@ jobs:
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
       ENDPOINT: https://cn-nb1.rains3.com
-      BUCKET: kuohu-objects
+      BUCKET: yanmo-objects
       PREFIX: AstraHerald/
     steps:
       - name: Checkout code
@@ -199,7 +199,7 @@ jobs:
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
       ENDPOINT: https://cn-nb1.rains3.com
-      BUCKET: kuohu-objects
+      BUCKET: yanmo-objects
       PREFIX: AstraHerald/latest/
     steps:
       - name: Checkout code
@@ -214,10 +214,13 @@ jobs:
       - name: Verify latest/ matches this build
         shell: pwsh
         run: |
+          $tmp = Join-Path $env:RUNNER_TEMP 'oss-verify'
           foreach ($file in Get-ChildItem 'dist-release' -File) {
             $key = "$env:PREFIX$($file.Name)"
-            $remote = aws s3api head-object --bucket $env:BUCKET --key $key --endpoint-url $env:ENDPOINT --query 'ContentLength' --output text
+            # 不用 head-object：这家 S3 对 HEAD 返回 403（AstraSchedule 的 CI 也改用 get-object 校验）。
+            aws s3api get-object --bucket $env:BUCKET --key $key --endpoint-url $env:ENDPOINT $tmp | Out-Null
             if ($LASTEXITCODE -ne 0) { Write-Error "读不到 $key"; exit $LASTEXITCODE }
+            $remote = (Get-Item $tmp).Length
             if ([long]$remote -ne [long]$file.Length) {
               Write-Error "::error::$key 远端大小 $remote 与本次构建 $($file.Length) 不一致"
               exit 1
