@@ -27,7 +27,7 @@ async function check() {
       <div class="row">
         <div class="row__label">
           <span>自动检查更新</span>
-          <span class="hint">启动后自动查一次，有新版本会问你要不要下载安装。</span>
+          <span class="hint">启动后自动查一次，有新版就静默装好并重启，不问你。</span>
         </div>
         <div class="row__control">
           <n-switch v-model:value="updater.enabled" />

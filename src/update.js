@@ -10,7 +10,7 @@ const { dialog, message } = createDiscreteApi(["dialog", "message"]);
 
 /// 启动时查一次。配置里关掉自动更新就什么都不做。
 export async function checkUpdateOnStart() {
-  // 开发时版本号一直是仓库里的 0.1.0，线上永远更大，不挡一下 dev 里会反复弹。
+  // 开发时版本号一直是仓库里的 0.1.0，线上永远更大，不挡一下 dev 里会被反复替换掉。
   if (!import.meta.env.PROD) return;
   try {
     const config = await loadConfig();
@@ -30,7 +30,14 @@ export async function checkUpdateOnStart() {
     return;
   }
   if (!update) return;
-  askAndInstall(update);
+  // 启动就静默装：不问，不弹框。安装器带 /UPDATE /R，装完自己把应用拉起来；
+  // 进程在安装器启动后就会退出，下面这几行不保证跑到。只有失败才出声——
+  // 静默失败等于坏了没人知道。
+  try {
+    await invoke("install_update");
+  } catch (error) {
+    message.error("自动更新失败，已按当前版本继续运行：" + error);
+  }
 }
 
 /// 配置页「检查更新」按钮：用户主动点的，所以无论自动更新开没开、是不是 dev 都真去查，
