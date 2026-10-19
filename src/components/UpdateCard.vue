@@ -1,12 +1,23 @@
 <script setup>
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { NButton, NCard, NInput, NSwitch } from "naive-ui";
+import { getVersion } from "@tauri-apps/api/app";
 import { checkUpdateManually } from "../update.js";
 
 /// { enabled, source }：自动检查更新的开关和更新源（config.rs 的 UpdaterSettings）。
 const updater = defineModel({ type: Object, required: true });
 
 const checking = ref(false);
+
+/// 当前版本号，直接问宿主（打包时写进 Cargo.toml 的那个）。
+const version = ref("");
+onMounted(async () => {
+  try {
+    version.value = await getVersion();
+  } catch (error) {
+    console.warn("读版本号失败：", error);
+  }
+});
 
 async function check() {
   checking.value = true;
@@ -22,6 +33,9 @@ async function check() {
 <template>
   <n-card size="small">
     <template #header>更新</template>
+    <template #header-extra>
+      <span class="version">当前版本 {{ version || "…" }}</span>
+    </template>
 
     <div class="rows">
       <div class="row">
@@ -89,6 +103,12 @@ async function check() {
 .row__control--wide {
   flex: 1 1 320px;
   max-width: 420px;
+}
+
+.version {
+  font-size: 12px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
 }
 
 .hint {
