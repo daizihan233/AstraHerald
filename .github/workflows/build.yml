@@ -10,11 +10,18 @@ on:
       - main
   workflow_dispatch:
 
+# 同一时刻只允许一条发布流水线跑：否则两条并发构建会各自算出不同版本号，
+# 并互相覆盖 OSS 上的 latest.json（run 9 / run 10 就被这个坑过一次）。
+concurrency:
+  group: rolling-build
+  cancel-in-progress: false
+
 jobs:
   # 版本号只在这里算一次，经 job output 提供给后面的任务共用。
   # 若各任务各自 Get-Date：跨午夜/月末或失败重跑时两次算出的日期不同，会发布成两个 release。
   version:
-    if: ${{ !startsWith(github.event.head_commit.message, 'docs') }}
+    # 手动 dispatch 时 github.event.head_commit 是 null，显式放行，否则 dispatch 会静默跳过整个流水线。
+    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'docs') }}
     runs-on: ubuntu-latest
     outputs:
       ver: ${{ steps.compute.outputs.ver }}
@@ -30,7 +37,7 @@ jobs:
   build_and_publish:
     name: Build & Publish
     needs: version
-    if: ${{ !startsWith(github.event.head_commit.message, 'docs') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'docs') }}
     permissions:
       contents: write
     runs-on: windows-latest
