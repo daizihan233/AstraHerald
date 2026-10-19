@@ -5,6 +5,7 @@
 //! 身份目前只有一个消费方：文件消息里的课件要不要自动打开。
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::notice::bot_handle;
 use crate::schedule::subject_names;
@@ -77,10 +78,33 @@ fn roles_for(friends: &[Friend], subjects: &[(String, String)]) -> HashMap<Strin
         .collect()
 }
 
+/// 全兜底时再拉几次科目表、每轮等多久。首次 + 2 次重试 = 最多问 3 次
+/// `/subjects`、最坏多等 4 秒——够 AstraSchedule 客户端慢半拍启动，又不会一直轮询。
+const RETRY_DELAY: Duration = Duration::from_secs(2);
+const RETRY_TIMES: usize = 2;
+
+/// 整份身份都是兜底值。只可能是科目表没拉到（课表服务没起 / 3011 还没就绪），
+/// 这时值得再试一次；只要有一个好友匹配上，就说明科目表是好的，不必重试。
+fn all_fallback(roles: &HashMap<String, String>) -> bool {
+    !roles.is_empty() && roles.values().all(|role| role == FALLBACK_ROLE)
+}
+
+/// 现拉一次科目表。每次调用都真的去问课表服务，不读旧结果。
+async fn fetch_subjects() -> Vec<(String, String)> {
+    // /subjects 是同步 TCP 调用，挪到阻塞线程池上，别占着 tokio 的工作线程。
+    tauri::async_runtime::spawn_blocking(subject_names)
+        .await
+        .unwrap_or_default()
+}
+
 /// 「一键配置」：把好友列表整体过一遍，逐个判定身份。
 ///
 /// 课表服务连不上时科目表是空的，这时所有人都是「课程」——仍然是有用的
 /// 结果（至少把好友列表填进来了），所以不因此报错。
+///
+/// 但「通篇都是课程」通常不是真的没课表，而是 AstraSchedule 还没起来：开机自启时
+/// 这个页面可能先到。所以第一次全兜底就隔 2 秒重拉科目表再算，最多重试 2 次；
+/// 等待用 async sleep，不占线程、不卡界面。重试完还是全兜底就照原样返回。
 #[tauri::command]
 pub async fn auto_fill_roles() -> Result<HashMap<String, String>, String> {
     let bot = bot_handle().ok_or_else(|| "bot 还没就绪".to_string())?;
@@ -89,11 +113,19 @@ pub async fn auto_fill_roles() -> Result<HashMap<String, String>, String> {
         return Err("还没拿到好友列表，等 bot 连上后再试".to_string());
     }
 
-    // /subjects 是同步 TCP 调用，挪到阻塞线程池上，别占着 tokio 的工作线程。
-    let subjects = tauri::async_runtime::spawn_blocking(subject_names)
-        .await
-        .unwrap_or_default();
-    Ok(roles_for(&friends, &subjects))
+    let mut roles = roles_for(&friends, &fetch_subjects().await);
+    for attempt in 1..=RETRY_TIMES {
+        if !all_fallback(&roles) {
+            break;
+        }
+        log::info!(
+            "好友身份全是兜底值，{attempt}/{RETRY_TIMES} 次重试：{}s 后重拉课表科目",
+            RETRY_DELAY.as_secs()
+        );
+        kovi::tokio::time::sleep(RETRY_DELAY).await;
+        roles = roles_for(&friends, &fetch_subjects().await);
+    }
+    Ok(roles)
 }
 
 /// 「好友身份」下拉里的一项：value 才是写进 config.json 的东西（QQ 号），
@@ -194,7 +226,26 @@ mod tests {
         assert_eq!(match_role("物理考试出题人", &real), "物理考试");
     }
 
-    #[test]    fn roles_for_covers_every_friend() {
+    /// 只有「全都没匹配上」才触发重试：有一个匹配上就说明科目表是好的。
+    #[test]
+    fn all_fallback_only_when_nobody_matched() {
+        let fallback = HashMap::from([
+            ("1".to_string(), FALLBACK_ROLE.to_string()),
+            ("2".to_string(), FALLBACK_ROLE.to_string()),
+        ]);
+        assert!(all_fallback(&fallback));
+
+        let mixed = HashMap::from([
+            ("1".to_string(), FALLBACK_ROLE.to_string()),
+            ("2".to_string(), "语文".to_string()),
+        ]);
+        assert!(!all_fallback(&mixed));
+
+        assert!(!all_fallback(&HashMap::new()));
+    }
+
+    #[test]
+    fn roles_for_covers_every_friend() {
         let friends = vec![
             Friend {
                 qq: 2,

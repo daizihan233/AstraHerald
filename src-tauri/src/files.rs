@@ -4,7 +4,7 @@
 //! 其余兜底只下载）。下载走 OneBot 的 get_file——kovi 没封装这个动作，
 //! 用 RuntimeBot::send_api_return 直接发（kovi-0.13.5/src/bot/runtimebot.rs:167）。
 //!
-//! 打开要过两道门：这位好友的 role 命中「当前或下一节课」的科目名，且当前没有全屏窗口。
+//! 打开要过两道门：窗口状态不是全屏/最大化，且这位好友的 role 命中「当前或下一节课」的科目名。
 
 use crate::config::{Config, FilePolicy, WindowState};
 use kovi::RuntimeBot;
@@ -172,11 +172,19 @@ pub async fn handle(
     }
 }
 
-/// 当前或下一节课是不是这位好友对应的那门课，且现在没有全屏窗口。
+/// 窗口状态是否一票否决自动打开。判定本身是纯函数，方便单测。
+///
+/// 最大化也算：用户可能正把别的窗口铺满屏幕看东西，弹窗抢焦点同样打扰。
+fn blocked_by_window_state(state: WindowState) -> bool {
+    matches!(state, WindowState::Fullscreen | WindowState::Maximized)
+}
+
+/// 窗口状态放行后，再看当前或下一节课是不是这位好友对应的那门课。
 fn should_open(user_id: i64, config: &Config) -> bool {
-    if crate::win::current_window_state() == WindowState::Fullscreen {
-        // 用户明确要求：全屏时只下载到桌面，不要抢焦点。
-        eprintln!("当前有全屏窗口，只下载不打开");
+    let state = crate::win::current_window_state();
+    if blocked_by_window_state(state) {
+        // 用户明确要求：全屏 / 最大化时（不论上课还是下课）都只下载到桌面，不抢焦点。
+        eprintln!("当前窗口是{}，只下载不打开", state.label());
         return false;
     }
     let Some(role) = config.roles.get(&user_id.to_string()) else {
@@ -252,6 +260,14 @@ mod tests {
         assert_eq!(ext_of("noext"), "");
         assert_eq!(ext_of(".gitignore"), "");
         assert_eq!(ext_of("trailing."), "");
+    }
+
+    /// 全屏和最大化都拦，其余状态交给课程判定。
+    #[test]
+    fn window_state_blocks_auto_open() {
+        assert!(blocked_by_window_state(WindowState::Fullscreen));
+        assert!(blocked_by_window_state(WindowState::Maximized));
+        assert!(!blocked_by_window_state(WindowState::Desktop));
     }
 
     /// 默认策略就是用户拍的那份：办公文档打开、图片不管、其余兜底下载。

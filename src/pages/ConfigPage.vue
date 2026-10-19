@@ -250,6 +250,16 @@ function clearRoles() {
   });
 }
 
+/// 兜底身份：后端 roles.rs 的 FALLBACK_ROLE，撞不上任何课程名时落的值。
+const FALLBACK_ROLE = "课程";
+
+/// 整份身份都是兜底值。多半是上次初始化时课表服务（AstraSchedule）还没起来。
+function allFallbackRoles() {
+  return (
+    roles.value.length > 0 && roles.value.every((row) => row.role === FALLBACK_ROLE)
+  );
+}
+
 async function reload() {
   loading.value = true;
   loadError.value = "";
@@ -257,8 +267,9 @@ async function reload() {
     toForm(normalizeConfig(await loadConfig()));
     savedSnapshot.value = formSnapshot();
     await loadFriends();
-    // 还没配过好友身份时顺手自动填一遍；填完就是「有未保存的修改」，由用户决定要不要保存。
-    if (roles.value.length === 0) await fillRoles(true);
+    // 还没配过好友身份、或上次只填到兜底值「课程」时顺手重填一遍（后端会再拉几次课表）；
+    // 填完就是「有未保存的修改」，由用户决定要不要保存。
+    if (roles.value.length === 0 || allFallbackRoles()) await fillRoles(true);
   } catch (error) {
     loadError.value = String(error);
   } finally {

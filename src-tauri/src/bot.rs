@@ -66,6 +66,7 @@ pub(crate) async fn plugin_main() {
                 target,
                 Some(history_id),
                 "收到消息",
+                false,
             );
         }
     });
@@ -73,9 +74,15 @@ pub(crate) async fn plugin_main() {
 
 /// 把一条要提醒的文本按当前场景矩阵送出去；真正又展示了就返回 true。
 ///
-/// 真收到的消息和聊天记录的重放共用这一条路径，区别只在 kind（日志前缀）
-/// 和 history_id（去重）。以前命中关键词就直接 reply_and_quote("👍")，那是联调
-/// 阶段的占位逻辑；强提醒走的是「用户点候选回复（notice_reply）才真的发出去」。
+/// 真收到的消息和聊天记录的重放共用这一条路径，区别在 kind（日志前缀）、
+/// history_id（去重）和 force_strong（见下）。以前命中关键词就直接
+/// reply_and_quote("👍")，那是联调阶段的占位逻辑；强提醒走的是
+/// 「用户点候选回复（notice_reply）才真的发出去」。
+///
+/// force_strong：重放走的那条。重放没有原始消息（ReplyTarget.message_id == 0），
+/// 所以一不按场景矩阵分级——不管上课/下课、窗口什么状态，一律强提醒
+/// （notice::show 置顶抢焦点），绝不允许落到 show_side；二不给候选回复，
+/// 点了也回不到正确的会话。真收到消息（on_msg）传 false，分级路由完全不变。
 fn deliver(
     text: &str,
     sender: &str,
@@ -83,26 +90,39 @@ fn deliver(
     target: ReplyTarget,
     history_id: Option<u64>,
     kind: &str,
+    force_strong: bool,
 ) -> bool {
     // 命中关键词就拿它的候选回复；没命中就是空表，提醒窗不显示候选按钮。
     // find_matched_keywords 返回的是 Value 的并集（即候选回复本身），不是关键词名
     // （utils/mod.rs:19-33），正好是这里要推给前端的。
-    let replies: Vec<String> = find_matched_keywords(text, &config.quick_replies)
-        .into_iter()
-        .cloned()
-        .collect();
+    // 重放恒为空表：message_id=0，没有原消息，点了回复也发不到正确的会话。
+    let replies: Vec<String> = if force_strong {
+        Vec::new()
+    } else {
+        find_matched_keywords(text, &config.quick_replies)
+            .into_iter()
+            .cloned()
+            .collect()
+    };
 
     // 场景矩阵决定这条消息怎么提醒：上课状态来自 AstraSchedule/desktop 的 /status
     // （连不上就用配置里的「默认状态」），窗口状态来自前台窗口（win.rs）。
     let (period, state, action) = crate::schedule::current_scene(config);
+    // 重放强制走强提醒：不排队、不降级成侧通知。
+    let action = if force_strong {
+        SceneAction::Strong
+    } else {
+        action
+    };
     // 决策依据必须留下：真机排查「怎么走成侧通知了」全看这一行。
     // 必须走 log 而不是 eprintln!：GUI 版没有控制台，stderr 没人接，只有 log 才落进 app.log
     // （安装版更明显——用户报「上课怎么还弹」时，这一行是唯一能证明 app 当时认为是什么状态的证据）。
     log::info!(
-        "{kind}：{} / {} → {}",
+        "{kind}：{} / {} → {}{}",
         period.label(),
         state.label(),
-        action.label()
+        action.label(),
+        if force_strong { "（重放：强制强提醒）" } else { "" }
     );
 
     match action {
@@ -125,6 +145,9 @@ fn deliver(
 ///
 /// 没有原始消息，所以 message_id 给 0——回复时只发文本、不带引用段。
 /// 已经在提醒窗里显示着的那条会被去重挡掉，这里就返回 false。
+///
+/// 和真收到消息的唯一区别：force_strong = true。重放是用户主动在聊天记录里点的，
+/// 必须当场看见——所以无视场景矩阵走强提醒，且不给候选回复（见 deliver）。
 pub fn replay(entry: &crate::history::Entry) -> bool {
     let Ok(sender_id) = entry.qq.parse::<i64>() else {
         eprintln!("聊天记录里的 QQ 号不合法，跳过：{}", entry.qq);
@@ -141,6 +164,7 @@ pub fn replay(entry: &crate::history::Entry) -> bool {
         },
         Some(entry.id),
         "重放消息",
+        true,
     )
 }
 
