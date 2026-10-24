@@ -33,6 +33,11 @@ dist-ssr
 # 自动更新的签名私钥：只有 CI 的 repo secrets 和本地这一份，绝不进版本库
 .secrets/
 
+# 宣传片工作区（录屏素材 1.3G + 渲染产物，与产品源码无关，不进版本库）
+promo/
+videoscript.txt
+拟定图标.png
+
 # 运行时数据（config.json 里有 QQ 号与本机路径，不进版本库）
 src-tauri/config.json
 src-tauri/config.json.bak
