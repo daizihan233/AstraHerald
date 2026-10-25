@@ -65,8 +65,9 @@ Tauri 不支持配置安装目录，所以 `src-tauri/nsis/installer.nsi` 是从
   `plugins.updater.endpoints`（`https://static.getastra.cn/AstraHerald/latest/latest.json`）
 - `bundle.createUpdaterArtifacts = true` 之后，本地 `tauri build` 也必须设
   `TAURI_SIGNING_PRIVATE_KEY`，否则构建直接失败（`tauri dev` 不受影响）
-- 客户端：`src/update.js` 启动时 `check()`，有新版弹窗 → `downloadAndInstall()` →
-  `relaunch()`；用 naive-ui 的 `createDiscreteApi` 是因为这段代码在 `NDialogProvider` 外面，
-  拿不到 `useDialog()`
-- 更新安装模式 NSIS `passive`（`plugins.updater.windows.installMode`）
+- 客户端：`src/update.js` 启动时 `check()`，有新版直接 `install_update`（不弹窗）→
+  安装器静默安装并 `/R` 拉起新版本；配置页的「检查更新」才是先确认再装。
+  用 naive-ui 的 `createDiscreteApi` 是因为这段代码在 `NDialogProvider` 外面，拿不到 `useDialog()`
+- 更新安装模式 NSIS `quiet`（`plugins.updater.windows.installMode`）。`passive` 会显示安装进度窗口，
+  `quiet` 传 `/S` 全静默；代价是安装器自身出错时没有任何提示（插件侧 ShellExecute 失败仍会回错误）
 - 换镜像 / 换域名要同时改客户端端点与 CI 里生成 `latest.json` 用的那个 URL

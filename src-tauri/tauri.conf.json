@@ -54,7 +54,7 @@
       "endpoints": ["https://static.getastra.cn/AstraHerald/latest/latest.json"],
       "requireSignedVersion": true,
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       }
     }
   }
