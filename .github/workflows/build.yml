@@ -183,10 +183,19 @@ jobs:
             aws s3 cp $local "s3://$env:BUCKET/$key" --endpoint-url "$env:ENDPOINT"
             if ($LASTEXITCODE -ne 0) { Write-Error "上传 $key 失败"; exit $LASTEXITCODE }
           }
-          # 按版本归档 + latest 稳定目录（客户端自动更新读 latest/）
+          # 按版本归档 + latest 稳定目录（客户端自动更新读 latest/）。
+          # 每个文件只上传一次：GitHub runner 到 Rains3 的上行只有 ~50 KiB/s，
+          # 6 MB 的包传两遍就要多等好几分钟（还会撞上 SlowDown），latest/ 用同桶服务端拷贝。
           foreach ($file in Get-ChildItem 'dist-release' -File) {
-            Push-OSS $file.FullName "${env:PREFIX}$ver/$($file.Name)"
-            Push-OSS $file.FullName "${env:PREFIX}latest/$($file.Name)"
+            $from = "${env:PREFIX}$ver/$($file.Name)"
+            $to = "${env:PREFIX}latest/$($file.Name)"
+            Push-OSS $file.FullName $from
+            Write-Host "Copying $from -> $to"
+            aws s3 cp "s3://$env:BUCKET/$from" "s3://$env:BUCKET/$to" --endpoint-url "$env:ENDPOINT"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "服务端拷贝失败，回退为直传 $to"
+              Push-OSS $file.FullName $to
+            }
           }
           Write-Host "OSS 上传完成：${env:PREFIX}$ver/ 与 ${env:PREFIX}latest/"
 
