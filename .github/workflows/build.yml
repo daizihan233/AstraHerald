@@ -46,6 +46,10 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.OSS_SECRET_KEY }}
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      # Rains3 会返回 SlowDown 限流；默认 3 次退避不够（run 40205436045 就挂在这），
+      # adaptive 按服务端的限流信号自我调节重试节奏。
+      AWS_RETRY_MODE: adaptive
+      AWS_MAX_ATTEMPTS: '10'
       ENDPOINT: https://cn-nb1.rains3.com
       BUCKET: kuohu-objects
       PREFIX: AstraHerald/
@@ -205,6 +209,8 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.OSS_SECRET_KEY }}
       AWS_DEFAULT_REGION: cn-east-1
       AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RETRY_MODE: adaptive
+      AWS_MAX_ATTEMPTS: '10'
       ENDPOINT: https://cn-nb1.rains3.com
       BUCKET: kuohu-objects
       PREFIX: AstraHerald/latest/
