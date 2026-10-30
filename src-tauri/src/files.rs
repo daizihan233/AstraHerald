@@ -1,14 +1,18 @@
 //! 文件消息：分类（忽略 / 仅下载 / 下载后打开）、下载到桌面、按需打开。
 //!
 //! 分类只看后缀名，桶来自配置项 `files`（open = 下载后按需打开，ignore = 完全不管，
-//! 其余兜底只下载）。下载走 OneBot 的 get_file——kovi 没封装这个动作，
-//! 用 RuntimeBot::send_api_return 直接发（kovi-0.13.5/src/bot/runtimebot.rs:167）。
+//! 其余兜底只下载）。取文件优先用文件段自带的 url（框架早就算好直链推过来了），
+//! 交给 download_file 落到本机；kovi 没封装这些拓展动作，用
+//! RuntimeBot::send_api_return 直接发（kovi-0.13.5/src/bot/runtimebot.rs:167）。
+//!
+//! 这里每一句诊断都必须走 log 而不是 eprintln!：GUI 版没有控制台，stderr 没人接，
+//! 只有 log 才落进 app.log（同 bot.rs:118 的约束）。文件收发最怕「什么都没发生」。
 //!
 //! 打开要过两道门：窗口状态不是全屏/最大化，且这位好友的 role 命中「当前或下一节课」的科目名。
 
 use crate::config::{Config, FilePolicy, WindowState};
 use kovi::RuntimeBot;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -57,6 +61,18 @@ pub fn plan(ext: &str, policy: &FilePolicy) -> FileAction {
 pub struct IncomingFile {
     pub name: String,
     pub file_id: Option<String>,
+    /// 框架已经算好的下载直链（rkey 签名、有时效，所以要当场下）。
+    pub url: Option<String>,
+    /// 私聊文件哈希；url 过期时拿它重新签一条直链。
+    pub file_hash: Option<String>,
+}
+
+/// 读段里一个非空字符串字段（框架有时给空串，当作没给）。
+fn field(data: &Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// 挑出消息里的文件段。
@@ -65,37 +81,37 @@ pub fn incoming(message: &kovi::message::Message) -> Vec<IncomingFile> {
         .iter()
         .filter(|segment| segment.kind == "file")
         .filter_map(|segment| {
-            let name = segment
-                .data
-                .get("file")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let file_id = segment
-                .data
-                .get("file_id")
-                .and_then(|value| value.as_str())
-                .map(|id| id.to_string());
+            let name = field(&segment.data, "file").unwrap_or_default();
+            let file_id = field(&segment.data, "file_id");
             if name.is_empty() && file_id.is_none() {
                 return None;
             }
             let name = if name.is_empty() { "文件".to_string() } else { name };
-            Some(IncomingFile { name, file_id })
+            Some(IncomingFile {
+                name,
+                file_id,
+                url: field(&segment.data, "url"),
+                file_hash: field(&segment.data, "file_hash"),
+            })
         })
         .collect()
 }
 
-/// 桌面目录。中文系统的 Desktop 一定是这个名字。
+/// 桌面目录。桌面被重定向到 OneDrive、或中文系统那份叫「桌面」的都在这些位置。
+///
+/// ponytail: 严格做法是 SHGetKnownFolderPath(FOLDERID_Desktop)（win.rs:154 那种裸
+/// extern 就够，不用加依赖）；本机注册表确认指向 %USERPROFILE%\Desktop，先按候选目录试。
 pub fn desktop_dir() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").map(PathBuf::from)?;
     let desktop = home.join("Desktop");
     if desktop.is_dir() {
         return Some(desktop);
     }
-    let onedrive = home.join("OneDrive").join("Desktop");
-    if onedrive.is_dir() {
-        return Some(onedrive);
+    let onedrive = home.join("OneDrive");
+    for candidate in [onedrive.join("Desktop"), onedrive.join("桌面"), home.join("桌面")] {
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
     }
     Some(desktop)
 }
@@ -118,7 +134,7 @@ pub fn deliver(source: &Path, name: &str, dir: &Path) -> std::io::Result<PathBuf
     let safe = sanitize(name);
     let mut target = dir.join(&safe);
     let mut counter = 2;
-    while target.exists() && counter <= 500 {
+    while target.exists() {
         let stem = Path::new(&safe)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -149,25 +165,30 @@ pub async fn handle(
     for file in incoming(message) {
         let action = plan(&ext_of(&file.name), &config.files);
         if action == FileAction::Ignore {
-            eprintln!("文件消息按策略忽略：{}", file.name);
+            log::info!("文件消息按策略忽略：{}", file.name);
             continue;
         }
-        let Some(source) = local_source(&bot, &file).await else {
-            eprintln!("取文件失败（get_file 没给本地路径）：{}", file.name);
+        let Some((source, staged)) = local_source(&bot, user_id, &file).await else {
+            log::error!("取文件失败（没拿到本地文件）：{}", file.name);
             continue;
         };
         let Some(dir) = desktop_dir() else {
-            eprintln!("找不到桌面目录，放弃下载：{}", file.name);
+            log::error!("找不到桌面目录，放弃下载：{}", file.name);
             continue;
         };
         match deliver(&source, &file.name, &dir) {
             Ok(path) => {
-                eprintln!("文件已下载到桌面：{}", path.display());
+                log::info!("文件已下载到桌面：{}", path.display());
                 if action == FileAction::Open && should_open(user_id, config) {
                     open_path(&path);
                 }
             }
-            Err(e) => eprintln!("写文件到桌面失败：{e}"),
+            Err(e) => log::error!("写文件到桌面失败：{e}"),
+        }
+        // download_file 落的那份是中转，拷完就删，别在框架的数据目录里堆垃圾。
+        // get_file 给的路径可能是框架自己的缓存，不能删。
+        if staged && let Err(e) = std::fs::remove_file(&source) {
+            log::warn!("删不掉中转文件 {}：{e}", source.display());
         }
     }
 }
@@ -184,11 +205,11 @@ fn should_open(user_id: i64, config: &Config) -> bool {
     let state = crate::win::current_window_state();
     if blocked_by_window_state(state) {
         // 用户明确要求：全屏 / 最大化时（不论上课还是下课）都只下载到桌面，不抢焦点。
-        eprintln!("当前窗口是{}，只下载不打开", state.label());
+        log::info!("当前窗口是{}，只下载不打开", state.label());
         return false;
     }
     let Some(role) = config.roles.get(&user_id.to_string()) else {
-        eprintln!("这位好友没有配身份（role），只下载不打开");
+        log::info!("这位好友没有配身份（role），只下载不打开");
         return false;
     };
     let lessons = crate::schedule::current_and_next_subjects();
@@ -196,32 +217,88 @@ fn should_open(user_id: i64, config: &Config) -> bool {
         .iter()
         .any(|lesson| lesson.contains(role.as_str()) || role.contains(lesson.as_str()));
     if !hit {
-        eprintln!("当前/下一节（{}）都不是「{}」的课，只下载不打开", lessons.join("、"), role);
+        log::info!("当前/下一节（{}）都不是「{}」的课，只下载不打开", lessons.join("、"), role);
     }
     hit
 }
 
-/// 问 OneBot 框架要文件的本地路径（get_file 返回 data.file）。
-async fn local_source(bot: &RuntimeBot, file: &IncomingFile) -> Option<PathBuf> {
+/// 发一个拓展动作；失败就把 status/retcode 记进日志。
+///
+/// 回包 status 不是 ok 时 kovi 走 Err 分支（kovi-onebot api_cnt.rs:200-204），
+/// SnowLuma 的失败原因写在 wording 字段，kovi 的 ApiReturn 没这个字段，所以这里只剩
+/// retcode 可看——框架自己那行 warn 里带着原始报文，会一起落进 app.log。
+async fn api_data(bot: &RuntimeBot, action: &str, params: Value) -> Option<Value> {
+    match bot.send_api_return(action, params).await {
+        Ok(ret) => Some(ret.data),
+        Err(ret) => {
+            log::error!("{action} 调用失败：status={} retcode={}", ret.status, ret.retcode);
+            None
+        }
+    }
+}
+
+/// 搞到文件的本地路径，返回（路径，是不是这次下的中转文件）。
+///
+/// 顺序：段里自带的 url → download_file；只有 file_id + file_hash → 先
+/// get_private_file_url 重签一条直链再 download_file；都没有才退回 get_file。
+/// get_file 在 SnowLuma 那边只解析图片/语音缓存（index.mjs 的 get_file 定义写明
+/// 「群文件请用 get_group_file_url」），普通私聊文件问它拿不到本地路径。
+async fn local_source(bot: &RuntimeBot, user_id: i64, file: &IncomingFile) -> Option<(PathBuf, bool)> {
+    let url = match &file.url {
+        Some(url) if url.starts_with("http") => Some(url.clone()),
+        _ => match (&file.file_id, &file.file_hash) {
+            (Some(id), Some(hash)) => {
+                let params = json!({ "user_id": user_id, "file_id": id, "file_hash": hash });
+                let data = api_data(bot, "get_private_file_url", params).await?;
+                let url = field(&data, "url")?;
+                if url.starts_with("http") {
+                    log::info!("直链过期了，重新签了一条：{}", file.name);
+                    Some(url)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+    };
+    if let Some(url) = url {
+        // download_file 只取 basename，名字里不能带路径分隔符，先过一遍 sanitize。
+        let params = json!({ "url": url, "name": sanitize(&file.name) });
+        let data = api_data(bot, "download_file", params).await?;
+        let staged = file_url_to_path(data.get("file").and_then(|v| v.as_str())?);
+        if staged.is_file() {
+            return Some((staged, true));
+        }
+        log::error!("download_file 说文件在 {}，本机却没有", staged.display());
+        return None;
+    }
+    get_file_source(bot, file).await.map(|path| (path, false))
+}
+
+/// 旧路子：问 get_file 要本地路径，留着兜底（换个框架可能真给路径）。
+async fn get_file_source(bot: &RuntimeBot, file: &IncomingFile) -> Option<PathBuf> {
     let mut params = json!({ "file": file.name });
     if let Some(id) = &file.file_id {
         params["file_id"] = json!(id);
     }
-    let ret = bot.send_api_return("get_file", params).await.ok()?;
-    let raw = ret.data.get("file").and_then(|v| v.as_str())?.trim();
+    let data = api_data(bot, "get_file", params).await?;
+    let raw = data.get("file").and_then(|v| v.as_str()).unwrap_or("").trim();
     if raw.is_empty() {
+        log::warn!("get_file 没给路径，段里也没有 url：{}", file.name);
         return None;
     }
     let path = file_url_to_path(raw);
     if path.is_file() {
-        Some(path)
-    } else {
-        eprintln!("get_file 给的路径不存在：{raw}");
-        None
+        return Some(path);
     }
+    log::warn!("get_file 给的路径不存在：{raw}");
+    None
 }
 
 /// OneBot 的 file 字段可能是本地路径，也可能是 file:///C:/... 形式。
+///
+/// ponytail: 不做百分号解码，中文名或带空格的 file:/// URL 会被当普通字符串。
+/// 主路径（download_file）给的是绝对路径，走不到这里，所以先不引 percent-encoding。
 fn file_url_to_path(raw: &str) -> PathBuf {
     match raw.strip_prefix("file://") {
         Some(rest) => {
@@ -242,7 +319,7 @@ fn open_path(path: &Path) {
         .arg(path)
         .creation_flags(CREATE_NO_WINDOW);
     if let Err(e) = cmd.spawn() {
-        eprintln!("打开文件失败：{e}");
+        log::error!("打开文件失败：{e}");
     }
 }
 
@@ -293,6 +370,49 @@ mod tests {
         };
         assert_eq!(plan("pptx", &policy), FileAction::Open);
         assert_eq!(plan("png", &policy), FileAction::Ignore);
+    }
+
+    /// 真机上报过的私聊文件段（SnowLuma 那份 data）：直链和哈希必须在段里就读到。
+    #[test]
+    fn incoming_reads_the_real_file_segment() {
+        let message = kovi::message::Message::from_value(json!([
+            {
+                "type": "file",
+                "data": {
+                    "file": "Test.MP3",
+                    "file_id": "f7ac2c7b_ad4e9bca",
+                    "file_size": 470254,
+                    "name": "Test.MP3",
+                    "size": 470254,
+                    "url": "http://49.86.42.34:80/asn.com/qqdownload?rkey=abc",
+                    "file_hash": "D6EATZ6OCPfZstkHEhRm5LMn876MmLfK"
+                }
+            }
+        ]))
+        .unwrap();
+        let files = incoming(&message);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "Test.MP3");
+        assert_eq!(files[0].file_id.as_deref(), Some("f7ac2c7b_ad4e9bca"));
+        assert_eq!(
+            files[0].url.as_deref(),
+            Some("http://49.86.42.34:80/asn.com/qqdownload?rkey=abc")
+        );
+        assert_eq!(files[0].file_hash.as_deref(), Some("D6EATZ6OCPfZstkHEhRm5LMn876MmLfK"));
+    }
+
+    /// 只有名字、url 是空串的旧格式也要收下，退回 get_file 那条兜底路。
+    #[test]
+    fn incoming_tolerates_segments_without_url() {
+        let message = kovi::message::Message::from_value(json!([
+            { "type": "file", "data": { "file": "课件.docx", "url": "", "file_hash": "" } }
+        ]))
+        .unwrap();
+        let files = incoming(&message);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_id, None);
+        assert_eq!(files[0].url, None);
+        assert_eq!(files[0].file_hash, None);
     }
 
     /// 附件名不能带路径，重名也不能覆盖桌面上已有的文件。
