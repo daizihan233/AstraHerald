@@ -31,18 +31,24 @@ pub(crate) async fn plugin_main() {
 
             let config = Config::load_or_create(CONFIG_PATH);
 
-            // 非纯文字消息：里面有文件段的交给 files.rs（下载桌面 / 按后缀策略忽略 /
-            // 需要时自动打开），其余（图片、表情、语音、混合消息里的文字）一律当没看见。
-            // 判据是 segment.kind（kovi-0.13.5/src/message.rs:8-12）。
-            if !event.message.iter().all(|segment| segment.kind == "text") {
-                if event.message.iter().any(|segment| segment.kind == "file") {
-                    crate::files::handle(bot.clone(), event.user_id, &event.message, &config).await;
-                }
-                return;
+            // 混排消息只截文字：图片、表情、语音等其他段一律丢弃，文字部分照常记历史 +
+            // 提醒（判据是 segment.kind，kovi-0.13.5/src/message.rs:8-12）。有文件段的
+            // 先交给 files.rs（下载桌面 / 按后缀策略忽略 / 需要时自动打开），落盘和文字
+            // 提醒互不影响——只发课件不带话的文件消息，text 为空，下面自己就 return 了。
+            // borrow_text 拿到的是 kovi-onebot 已经拼好的所有 text 段
+            // （kovi-onebot-0.13.2/src/event/msg_event.rs:222-236，join("\n") 再 trim），
+            // 所以这里不需要自己遍历段。
+            if event.message.iter().any(|segment| segment.kind == "file") {
+                crate::files::handle(bot.clone(), event.user_id, &event.message, &config).await;
             }
-            let Some(text) = event.borrow_text() else {
+            let Some(spoken) = event.borrow_text() else {
                 return;
             };
+            let text = spoken.trim();
+            if text.is_empty() {
+                // 只有空白文字段（图片配了个空格之类）：没话可提醒，别记一条空历史。
+                return;
+            }
 
             // 提醒窗顶栏要显示「备注 [用户名] （QQ号）」。好友列表有 5 分钟缓存，正常情况下
             // 这里只是查一次表；查不到也会退化成「（QQ号）」，不会挡住建窗。
