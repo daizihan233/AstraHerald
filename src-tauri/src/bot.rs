@@ -2,7 +2,8 @@ use kovi::PluginBuilder as plugin;
 use kovi::config::kovi_conf::KoviConf;
 use kovi::event::MessageEventTrait;
 use kovi::event::id::ID;
-use kovi_onebot::*;
+// on_msg 来自这个 trait（kovi-onebot 的 event 注册扩展），显式导入以免通配（sonar S2208）。
+use kovi_onebot::EventRegistrar as _;
 
 use crate::config::{Config, SceneAction, CONFIG_PATH};
 use crate::notice::ReplyTarget;

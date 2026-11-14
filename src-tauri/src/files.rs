@@ -137,11 +137,11 @@ pub fn deliver(source: &Path, name: &str, dir: &Path) -> std::io::Result<PathBuf
     while target.exists() {
         let stem = Path::new(&safe)
             .file_stem()
-            .and_then(|s| s.to_str())
+            .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("文件");
         let ext = Path::new(&safe)
             .extension()
-            .and_then(|s| s.to_str())
+            .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("");
         let candidate = if ext.is_empty() {
             format!("{stem} ({counter})")
@@ -176,19 +176,28 @@ pub async fn handle(
             log::error!("找不到桌面目录，放弃下载：{}", file.name);
             continue;
         };
-        match deliver(&source, &file.name, &dir) {
-            Ok(path) => {
+        // 复制和删除都是阻塞 IO，直接在 async 里跑会堵住 tokio 的 worker
+        // （sonar rust:S7493），所以整段挪进 spawn_blocking。中转文件的清理也一起丢进去，
+        // 它本来就是「拷完就删」的收尾动作：download_file 落的那份是临时件，
+        // get_file 给的可能是框架自己的缓存，不能删。
+        let name = file.name.clone();
+        let cleanup = staged;
+        let task = kovi::tokio::task::spawn_blocking(move || {
+            let outcome = deliver(&source, &name, &dir);
+            if cleanup && let Err(e) = std::fs::remove_file(&source) {
+                log::warn!("删不掉中转文件 {}：{e}", source.display());
+            }
+            outcome
+        });
+        match task.await {
+            Ok(Ok(path)) => {
                 log::info!("文件已下载到桌面：{}", path.display());
                 if action == FileAction::Open && should_open(user_id, config) {
                     open_path(&path);
                 }
             }
-            Err(e) => log::error!("写文件到桌面失败：{e}"),
-        }
-        // download_file 落的那份是中转，拷完就删，别在框架的数据目录里堆垃圾。
-        // get_file 给的路径可能是框架自己的缓存，不能删。
-        if staged && let Err(e) = std::fs::remove_file(&source) {
-            log::warn!("删不掉中转文件 {}：{e}", source.display());
+            Ok(Err(e)) => log::error!("写文件到桌面失败：{e}"),
+            Err(e) => log::error!("下载任务被取消或 panic：{e}"),
         }
     }
 }
