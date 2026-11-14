@@ -253,35 +253,44 @@ async fn api_data(bot: &RuntimeBot, action: &str, params: Value) -> Option<Value
 /// get_file 在 SnowLuma 那边只解析图片/语音缓存（index.mjs 的 get_file 定义写明
 /// 「群文件请用 get_group_file_url」），普通私聊文件问它拿不到本地路径。
 async fn local_source(bot: &RuntimeBot, user_id: i64, file: &IncomingFile) -> Option<(PathBuf, bool)> {
-    let url = match &file.url {
-        Some(url) if url.starts_with("http") => Some(url.clone()),
-        _ => match (&file.file_id, &file.file_hash) {
-            (Some(id), Some(hash)) => {
-                let params = json!({ "user_id": user_id, "file_id": id, "file_hash": hash });
-                let data = api_data(bot, "get_private_file_url", params).await?;
-                let url = field(&data, "url")?;
-                if url.starts_with("http") {
-                    log::info!("直链过期了，重新签了一条：{}", file.name);
-                    Some(url)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        },
-    };
-    if let Some(url) = url {
-        // download_file 只取 basename，名字里不能带路径分隔符，先过一遍 sanitize。
-        let params = json!({ "url": url, "name": sanitize(&file.name) });
-        let data = api_data(bot, "download_file", params).await?;
-        let staged = file_url_to_path(data.get("file").and_then(|v| v.as_str())?);
-        if staged.is_file() {
-            return Some((staged, true));
+    // 逐级降级，任何一级失败都继续试下一级——段内直链带 rkey，有时效，
+    // 过期是常见情况，不能让它的失败把后面两次机会一起吃掉。
+    if let Some(url) = file.url.as_deref().filter(|url| url.starts_with("http")) {
+        if let Some(path) = download(bot, url, &file.name).await {
+            return Some((path, true));
         }
-        log::error!("download_file 说文件在 {}，本机却没有", staged.display());
-        return None;
+        log::warn!("段内直链下载失败，试试重新签名：{}", file.name);
+    }
+    if let (Some(id), Some(hash)) = (&file.file_id, &file.file_hash) {
+        let params = json!({ "user_id": user_id, "file_id": id, "file_hash": hash });
+        match api_data(bot, "get_private_file_url", params).await {
+            Some(data) => match field(&data, "url").filter(|url| url.starts_with("http")) {
+                Some(url) => {
+                    log::info!("重新签了一条直链：{}", file.name);
+                    if let Some(path) = download(bot, &url, &file.name).await {
+                        return Some((path, true));
+                    }
+                    log::warn!("重签的直链也下不下来，退回 get_file：{}", file.name);
+                }
+                None => log::warn!("get_private_file_url 没给可用的 url：{}", file.name),
+            },
+            None => log::warn!("重新签名失败，退回 get_file：{}", file.name),
+        }
     }
     get_file_source(bot, file).await.map(|path| (path, false))
+}
+
+/// 把一条直链落到本机，返回本地路径（这一份是中转文件，用完要删）。
+async fn download(bot: &RuntimeBot, url: &str, name: &str) -> Option<PathBuf> {
+    // download_file 只取 basename，名字里不能带路径分隔符，先过一遍 sanitize。
+    let params = json!({ "url": url, "name": sanitize(name) });
+    let data = api_data(bot, "download_file", params).await?;
+    let path = file_url_to_path(data.get("file").and_then(|v| v.as_str())?);
+    if path.is_file() {
+        return Some(path);
+    }
+    log::error!("download_file 说文件在 {}，本机却没有", path.display());
+    None
 }
 
 /// 旧路子：问 get_file 要本地路径，留着兜底（换个框架可能真给路径）。

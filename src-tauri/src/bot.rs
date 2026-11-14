@@ -33,23 +33,27 @@ pub(crate) async fn plugin_main() {
             let config = Config::load_or_create(CONFIG_PATH);
 
             // 混排消息只截文字：图片、表情、语音等其他段一律丢弃，文字部分照常记历史 +
-            // 提醒（判据是 segment.kind，kovi-0.13.5/src/message.rs:8-12）。有文件段的
-            // 先交给 files.rs（下载桌面 / 按后缀策略忽略 / 需要时自动打开），落盘和文字
-            // 提醒互不影响——只发课件不带话的文件消息，text 为空，下面自己就 return 了。
-            // borrow_text 拿到的是 kovi-onebot 已经拼好的所有 text 段
+            // 提醒（判据是 segment.kind，kovi-0.13.5/src/message.rs:8-12）。borrow_text 拿到
+            // 的是 kovi-onebot 已经拼好的所有 text 段
             // （kovi-onebot-0.13.2/src/event/msg_event.rs:222-236，join("\n") 再 trim），
             // 所以这里不需要自己遍历段。
+            //
+            // 文件段丢进独立 task：课件动辄几十兆，下载 + 落盘要几秒，串在这里等会把
+            // 「收到消息」的提醒一起拖住（CodeRabbit 提的正是这条）。纯文件消息 text 为空，
+            // 下面 return 掉，但文件那条 task 照样在跑。
             if event.message.iter().any(|segment| segment.kind == "file") {
-                crate::files::handle(bot.clone(), event.user_id, &event.message, &config).await;
+                let (file_bot, message, file_config) =
+                    (bot.clone(), event.message.clone(), config.clone());
+                let user_id = event.user_id;
+                kovi::spawn(async move {
+                    crate::files::handle(file_bot, user_id, &message, &file_config).await;
+                });
             }
-            let Some(spoken) = event.borrow_text() else {
+            let Some(text) = event.borrow_text().map(str::trim).filter(|text| !text.is_empty())
+            else {
+                // 没文字、或只有空白文字段（图片配了个空格之类）：没话可提醒，别记空历史。
                 return;
             };
-            let text = spoken.trim();
-            if text.is_empty() {
-                // 只有空白文字段（图片配了个空格之类）：没话可提醒，别记一条空历史。
-                return;
-            }
 
             // 提醒窗顶栏要显示「备注 [用户名] （QQ号）」。好友列表有 5 分钟缓存，正常情况下
             // 这里只是查一次表；查不到也会退化成「（QQ号）」，不会挡住建窗。
