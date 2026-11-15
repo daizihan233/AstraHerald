@@ -115,6 +115,9 @@ pub fn desktop_dir() -> Option<PathBuf> {
         data4: [0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41],
     };
 
+    /// COINIT_APARTMENTTHREADED：桌面是 shell 对象，走 STA 最稳。
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
+
     #[repr(C)]
     struct Guid {
         data1: u32,
@@ -136,29 +139,47 @@ pub fn desktop_dir() -> Option<PathBuf> {
     #[link(name = "ole32")]
     unsafe extern "system" {
         fn CoTaskMemFree(block: *mut core::ffi::c_void);
+        fn CoInitializeEx(reserved: *mut core::ffi::c_void, coinit: u32) -> i32;
+        fn CoUninitialize();
     }
 
     unsafe {
+        // 微软文档明确要求：调用 SHGetKnownFolderPath 的线程必须先初始化 COM。
+        // desktop_dir() 是在 handle() 里 .await 之后调的，可能落在没初始化过的 tokio
+        // worker 上——不初始化就可能查失败，然后静默退回用户目录下的 Desktop，
+        // 把「跟着 OneDrive 重定向走」这件事整个抵消掉。
+        // S_OK(0) / S_FALSE(1) 都算这次初始化成功，退出时必须配对 CoUninitialize；
+        // RPC_E_CHANGED_MODE(0x80010106，负数) 表示已被别的公寓初始化过，不能 uninit。
+        let owned = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) >= 0;
+
         let mut raw: *mut u16 = std::ptr::null_mut();
         // 0 = KF_FLAG_DEFAULT；token 传 0 表示当前用户。
-        if SHGetKnownFolderPath(&FOLDERID_DESKTOP, 0, 0, &mut raw) < 0 || raw.is_null() {
-            log::error!("SHGetKnownFolderPath 拿不到桌面目录，退回用户目录下的 Desktop");
-            return std::env::var_os("USERPROFILE")
-                .map(|home| PathBuf::from(home).join("Desktop"));
+        let hr = SHGetKnownFolderPath(&FOLDERID_DESKTOP, 0, 0, &mut raw);
+        let path = if hr < 0 || raw.is_null() {
+            None
+        } else {
+            let mut len = 0usize;
+            while *raw.add(len) != 0 {
+                len += 1;
+            }
+            // 读和 free 的先后不能反：raw 是系统分配的，CoTaskMemFree 之后就成活野指针。
+            let desktop = PathBuf::from(std::ffi::OsString::from_wide(
+                std::slice::from_raw_parts(raw, len),
+            ));
+            CoTaskMemFree(raw as *mut core::ffi::c_void);
+            Some(desktop)
+        };
+
+        if owned {
+            CoUninitialize();
         }
-        let mut len = 0usize;
-        while *raw.add(len) != 0 {
-            len += 1;
+        if path.is_some() {
+            return path;
         }
-        // 读和 free 的先后不能反：raw 是系统分配的，CoTaskMemFree 之后就成活野指针。
-        let desktop = PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
-            raw, len,
-        )));
-        CoTaskMemFree(raw as *mut core::ffi::c_void);
-        Some(desktop)
+        log::error!("SHGetKnownFolderPath 拿不到桌面目录，退回用户目录下的 Desktop");
+        std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Desktop"))
     }
 }
-
 #[cfg(not(windows))]
 pub fn desktop_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Desktop"))
@@ -178,29 +199,62 @@ fn sanitize(name: &str) -> String {
 }
 
 /// 复制到目标目录；重名时加 (2)、(3)……，不覆盖用户桌面上已有的文件。
+///
+/// 占位必须原子：现在每条文件消息各跑一个 blocking 任务，两条都叫 notes.pdf 的消息
+/// 会同时走这里。先 exists() 再 copy 的写法，两个任务可能都判定「不存在」，
+/// 后完成的那份把先写好的覆盖掉——附件就这么静默丢了。所以用 create_new 独占创建
+/// 占住名字（已存在会直接返回 AlreadyExists），再往这个已经属于自己的文件里写。
 pub fn deliver(source: &Path, name: &str, dir: &Path) -> std::io::Result<PathBuf> {
     let safe = sanitize(name);
-    let mut target = dir.join(&safe);
-    let mut counter = 2;
-    while target.exists() {
-        let stem = Path::new(&safe)
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("文件");
-        let ext = Path::new(&safe)
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("");
-        let candidate = if ext.is_empty() {
+    let stem = Path::new(&safe)
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("文件");
+    let ext = Path::new(&safe)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("");
+
+    let mut counter = 1;
+    loop {
+        let candidate = if counter == 1 {
+            safe.clone()
+        } else if ext.is_empty() {
             format!("{stem} ({counter})")
         } else {
             format!("{stem} ({counter}).{ext}")
         };
-        target = dir.join(candidate);
-        counter += 1;
+        let target = dir.join(candidate);
+        // ponytail: 上限只是防死循环（目录里真有几千份同名附件时才会碰到），
+        // 碰到了就报错，绝不覆盖。
+        if counter > 1000 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "同名附件太多，找不到可用文件名",
+            ));
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(mut reserved) => {
+                let mut src = std::fs::File::open(source)?;
+                if let Err(e) = std::io::copy(&mut src, &mut reserved) {
+                    drop(reserved);
+                    // 别在桌面上留一个半截文件。
+                    let _ = std::fs::remove_file(&target);
+                    return Err(e);
+                }
+                return Ok(target);
+            }
+            // 名字被占了（别的任务先占到，或桌面上本来就有）：换个后缀重来。
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                counter += 1;
+            }
+            Err(e) => return Err(e),
+        }
     }
-    std::fs::copy(source, &target)?;
-    Ok(target)
 }
 
 /// 收到含文件段的消息时调用：该忽略的忽略，该下载的下载，该打开的打开。
@@ -488,6 +542,40 @@ mod tests {
         let dir = desktop_dir().expect("拿不到桌面目录");
         assert!(dir.is_absolute(), "桌面目录不是绝对路径: {}", dir.display());
         assert!(dir.is_dir(), "桌面目录不存在: {}", dir.display());
+    }
+    /// 并发落盘同名附件不能互相覆盖：模拟两条 notes.pdf 同时到。
+    #[test]
+    fn concurrent_deliver_keeps_both_files() {
+        let dir = std::env::temp_dir().join(format!("astra-herald-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.bin");
+        std::fs::write(&source, b"payload").unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (source, dir) = (source.clone(), dir.clone());
+                std::thread::spawn(move || deliver(&source, "notes.pdf", &dir))
+            })
+            .collect();
+        let paths: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap())
+            .collect();
+
+        // 8 个任务必须拿到 8 个互不相同的文件名，一个都不能丢。
+        let mut names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 8, "文件名重复了: {names:?}");
+        for path in &paths {
+            assert_eq!(std::fs::read(path).unwrap(), b"payload", "{} 内容不对", path.display());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
     /// 附件名不能带路径，重名也不能覆盖桌面上已有的文件。
     #[test]
