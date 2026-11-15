@@ -97,23 +97,71 @@ pub fn incoming(message: &kovi::message::Message) -> Vec<IncomingFile> {
         .collect()
 }
 
-/// 桌面目录。桌面被重定向到 OneDrive、或中文系统那份叫「桌面」的都在这些位置。
+/// 桌面目录：直接问系统要，不猜。
 ///
-/// ponytail: 严格做法是 SHGetKnownFolderPath(FOLDERID_Desktop)（win.rs:154 那种裸
-/// extern 就够，不用加依赖）；本机注册表确认指向 %USERPROFILE%\Desktop，先按候选目录试。
+/// 桌面**不一定**是用户目录下的 Desktop。OneDrive 的「备份文件夹」（Known Folder Move）
+/// 会把桌面整个搬走——一般是 OneDrive 目录下的 Desktop，企业版还会叫「OneDrive - 公司名」；
+/// 同时注册表 User Shell Folders\Desktop 被改写。所以列候选目录永远列不全，
+/// SHGetKnownFolderPath(FOLDERID_Desktop) 才是那份权威答案，重定向、改名、多语言它都替我们处理了。
+#[cfg(windows)]
 pub fn desktop_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE").map(PathBuf::from)?;
-    let desktop = home.join("Desktop");
-    if desktop.is_dir() {
-        return Some(desktop);
+    use std::os::windows::ffi::OsStringExt;
+
+    /// FOLDERID_Desktop = {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
+    const FOLDERID_DESKTOP: Guid = Guid {
+        data1: 0xB4BF_CC3A,
+        data2: 0xDB2C,
+        data3: 0x424C,
+        data4: [0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41],
+    };
+
+    #[repr(C)]
+    struct Guid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
     }
-    let onedrive = home.join("OneDrive");
-    for candidate in [onedrive.join("Desktop"), onedrive.join("桌面"), home.join("桌面")] {
-        if candidate.is_dir() {
-            return Some(candidate);
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SHGetKnownFolderPath(
+            id: *const Guid,
+            flags: u32,
+            token: isize,
+            path: *mut *mut u16,
+        ) -> i32;
+    }
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoTaskMemFree(block: *mut core::ffi::c_void);
+    }
+
+    unsafe {
+        let mut raw: *mut u16 = std::ptr::null_mut();
+        // 0 = KF_FLAG_DEFAULT；token 传 0 表示当前用户。
+        if SHGetKnownFolderPath(&FOLDERID_DESKTOP, 0, 0, &mut raw) < 0 || raw.is_null() {
+            log::error!("SHGetKnownFolderPath 拿不到桌面目录，退回用户目录下的 Desktop");
+            return std::env::var_os("USERPROFILE")
+                .map(|home| PathBuf::from(home).join("Desktop"));
         }
+        let mut len = 0usize;
+        while *raw.add(len) != 0 {
+            len += 1;
+        }
+        // 读和 free 的先后不能反：raw 是系统分配的，CoTaskMemFree 之后就成活野指针。
+        let desktop = PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
+            raw, len,
+        )));
+        CoTaskMemFree(raw as *mut core::ffi::c_void);
+        Some(desktop)
     }
-    Some(desktop)
+}
+
+#[cfg(not(windows))]
+pub fn desktop_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Desktop"))
 }
 
 /// 文件名里不允许出现路径分隔符：附件名是对方给的，不能让它写到桌面以外的地方。
@@ -433,6 +481,14 @@ mod tests {
         assert_eq!(files[0].file_hash, None);
     }
 
+    /// 桌面目录必须真实存在且是绝对路径——SHGetKnownFolderPath 失败时这条会红。
+    #[cfg(windows)]
+    #[test]
+    fn desktop_dir_is_a_real_directory() {
+        let dir = desktop_dir().expect("拿不到桌面目录");
+        assert!(dir.is_absolute(), "桌面目录不是绝对路径: {}", dir.display());
+        assert!(dir.is_dir(), "桌面目录不存在: {}", dir.display());
+    }
     /// 附件名不能带路径，重名也不能覆盖桌面上已有的文件。
     #[test]
     fn deliver_sanitizes_names_and_avoids_overwrite() {
