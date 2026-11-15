@@ -2,7 +2,8 @@ use kovi::PluginBuilder as plugin;
 use kovi::config::kovi_conf::KoviConf;
 use kovi::event::MessageEventTrait;
 use kovi::event::id::ID;
-use kovi_onebot::*;
+// on_msg 来自这个 trait（kovi-onebot 的 event 注册扩展），显式导入以免通配（sonar S2208）。
+use kovi_onebot::EventRegistrar as _;
 
 use crate::config::{Config, SceneAction, CONFIG_PATH};
 use crate::notice::ReplyTarget;
@@ -31,16 +32,26 @@ pub(crate) async fn plugin_main() {
 
             let config = Config::load_or_create(CONFIG_PATH);
 
-            // 非纯文字消息：里面有文件段的交给 files.rs（下载桌面 / 按后缀策略忽略 /
-            // 需要时自动打开），其余（图片、表情、语音、混合消息里的文字）一律当没看见。
-            // 判据是 segment.kind（kovi-0.13.5/src/message.rs:8-12）。
-            if !event.message.iter().all(|segment| segment.kind == "text") {
-                if event.message.iter().any(|segment| segment.kind == "file") {
-                    crate::files::handle(bot.clone(), event.user_id, &event.message, &config).await;
-                }
-                return;
+            // 混排消息只截文字：图片、表情、语音等其他段一律丢弃，文字部分照常记历史 +
+            // 提醒（判据是 segment.kind，kovi-0.13.5/src/message.rs:8-12）。borrow_text 拿到
+            // 的是 kovi-onebot 已经拼好的所有 text 段
+            // （kovi-onebot-0.13.2/src/event/msg_event.rs:222-236，join("\n") 再 trim），
+            // 所以这里不需要自己遍历段。
+            //
+            // 文件段丢进独立 task：课件动辄几十兆，下载 + 落盘要几秒，串在这里等会把
+            // 「收到消息」的提醒一起拖住（CodeRabbit 提的正是这条）。纯文件消息 text 为空，
+            // 下面 return 掉，但文件那条 task 照样在跑。
+            if event.message.iter().any(|segment| segment.kind == "file") {
+                let (file_bot, message, file_config) =
+                    (bot.clone(), event.message.clone(), config.clone());
+                let user_id = event.user_id;
+                kovi::spawn(async move {
+                    crate::files::handle(file_bot, user_id, &message, &file_config).await;
+                });
             }
-            let Some(text) = event.borrow_text() else {
+            let Some(text) = event.borrow_text().map(str::trim).filter(|text| !text.is_empty())
+            else {
+                // 没文字、或只有空白文字段（图片配了个空格之类）：没话可提醒，别记空历史。
                 return;
             };
 
